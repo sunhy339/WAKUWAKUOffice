@@ -8,9 +8,7 @@ use crate::agent::tool::{OfficeTool, ToolArtifact, ToolContext, ToolResult};
 use crate::llm::LlmClient;
 use crate::models::{ChatAttachment, ChatMessage};
 
-use super::agnes_media::{
-    agnes_video_model, get_json, http_client, post_json, resolve_video_credentials,
-};
+use super::agnes_media::{get_json, http_client, post_json, resolve_video_route};
 use super::local_video;
 
 pub struct VideoGenerateTool;
@@ -806,8 +804,8 @@ impl OfficeTool for VideoGenerateTool {
         let num_frames = (plan.seconds as u32) * frame_rate;
 
         // ---- Agnes 凭证 ----
-        let credentials = match resolve_video_credentials(&ctx.user_id) {
-            Ok(credentials) => credentials,
+        let media_route = match resolve_video_route(&ctx.user_id).await {
+            Ok(route) => route,
             Err(err) => {
                 return local_video_artifact(
                     ctx,
@@ -824,7 +822,8 @@ impl OfficeTool for VideoGenerateTool {
                 .await;
             }
         };
-        let video_model = agnes_video_model();
+        let credentials = media_route.credentials;
+        let video_model = media_route.model;
         let client = match http_client(Duration::from_secs(90)) {
             Ok(client) => client,
             Err(err) => {

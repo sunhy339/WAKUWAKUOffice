@@ -8,9 +8,8 @@ use crate::agent::tool::{OfficeTool, ToolArtifact, ToolContext, ToolResult};
 use crate::llm::LlmClient;
 use crate::models::{ChatAttachment, ChatMessage};
 
-use super::agnes_media::{
-    agnes_image_model, http_client, post_json_url, resolve_image_credentials, AgnesCredentials,
-};
+use super::agnes_media::{http_client, post_json_url, resolve_image_route, AgnesCredentials};
+use crate::llm::routing::ModelRequirement;
 
 pub struct ImagePromptTool;
 
@@ -342,11 +341,17 @@ impl OfficeTool for ImagePromptTool {
             Err(err) => return ToolResult::err(err),
         };
 
-        let credentials = match resolve_image_credentials(&ctx.user_id) {
-            Ok(credentials) => credentials,
+        let media_requirement = if wants_image_to_image {
+            ModelRequirement::ImageEdit
+        } else {
+            ModelRequirement::ImageGeneration
+        };
+        let media_route = match resolve_image_route(&ctx.user_id, media_requirement).await {
+            Ok(route) => route,
             Err(err) => return ToolResult::err(err.to_string()),
         };
-        let image_model = agnes_image_model();
+        let credentials = media_route.credentials;
+        let image_model = media_route.model;
         let endpoint = credentials.endpoint("/v1/images/generations");
         let client = match http_client(Duration::from_secs(240)) {
             Ok(client) => client,

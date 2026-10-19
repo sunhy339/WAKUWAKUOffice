@@ -895,8 +895,18 @@ async fn chat_stream(
         infer_media_tool_kind(&req).or_else(|| req.tool_kind.clone())
     };
 
+    let model_requirement = if has_image {
+        crate::llm::ModelRequirement::Vision
+    } else {
+        crate::llm::ModelRequirement::ToolCalling
+    };
     let client = std::sync::Arc::new(
-        crate::llm::LlmClient::for_user(&user.0.id, req.model.as_deref()).await,
+        crate::llm::LlmClient::for_user_with_requirement(
+            &user.0.id,
+            req.model.as_deref(),
+            model_requirement,
+        )
+        .await,
     );
 
     // 会话表的 project_id 是通用 projects 表的外键；PPT 文件项目使用独立的

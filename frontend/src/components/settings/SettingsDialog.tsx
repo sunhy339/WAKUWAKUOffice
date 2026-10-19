@@ -1,7 +1,7 @@
 import { Check, Cpu, Eye, EyeOff, KeyRound, Plus, RefreshCw, SlidersHorizontal, Trash2, X } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { settingsApi } from '@/api'
-import type { AppSettings, LLMProfile, MCPServiceConfig } from '@/types'
+import type { AppSettings, LLMModelConfig, LLMProfile, MCPServiceConfig, ModelCapability } from '@/types'
 
 interface SettingsDialogProps {
   open: boolean
@@ -21,7 +21,39 @@ const emptyProfile = (): LLMProfile => ({
   api_keys: [],
   models: [],
   default_model: '',
+  model_configs: [],
 })
+
+const capabilityOptions: Array<{ value: ModelCapability; label: string }> = [
+  { value: 'text', label: '文本' },
+  { value: 'tool_calling', label: '工具' },
+  { value: 'vision', label: '视觉' },
+  { value: 'image_generation', label: '文生图' },
+  { value: 'image_edit', label: '图生图' },
+  { value: 'video_generation', label: '视频' },
+]
+
+function legacyModelCapabilities(model: string): ModelCapability[] {
+  const normalized = model.trim().toLowerCase()
+  if (/^(agnes|gpt)-image-/.test(normalized) || /^image-/.test(normalized)) {
+    return ['image_generation', 'image_edit']
+  }
+  if (/^(agnes|gpt)-video-/.test(normalized) || /^video-/.test(normalized)) {
+    return ['video_generation']
+  }
+  return ['text', 'tool_calling', 'vision']
+}
+
+function getModelConfigs(profile: LLMProfile): LLMModelConfig[] {
+  const configured = Array.isArray(profile.model_configs) ? profile.model_configs : []
+  return (profile.models || []).map((model) => configured.find((item) => item.model === model) || ({
+    model,
+    capabilities: legacyModelCapabilities(model),
+    enabled: true,
+    priority: 0,
+    status: 'unknown',
+  }))
+}
 
 function getProfileKeys(profile: LLMProfile) {
   const keys = Array.isArray(profile.api_keys) ? profile.api_keys : []
@@ -76,6 +108,14 @@ export function SettingsDialog({ open, settings, onClose, onSave }: SettingsDial
     const nextProfiles = draft.llm_profiles.map((profile) => {
       if (profile.id !== id) return profile
       const next = { ...profile, ...patch }
+      const existingConfigs = Array.isArray(next.model_configs) ? next.model_configs : []
+      next.model_configs = (next.models || []).map((model) => existingConfigs.find((item) => item.model === model) || ({
+        model,
+        capabilities: legacyModelCapabilities(model),
+        enabled: true,
+        priority: 0,
+        status: 'unknown',
+      }))
       if (!next.models.includes(next.default_model)) {
         next.default_model = next.models[0] || ''
       }
@@ -125,6 +165,22 @@ export function SettingsDialog({ open, settings, onClose, onSave }: SettingsDial
   const addMcp = () => updateDraft({ mcp_servers: [...draft.mcp_servers, emptyMcpServer()] })
 
   const removeMcp = (id: string) => updateDraft({ mcp_servers: draft.mcp_servers.filter((server) => server.id !== id) })
+
+  const updateModelConfig = (profile: LLMProfile, model: string, patch: Partial<LLMModelConfig>) => {
+    const configs = getModelConfigs(profile).map((config) => (
+      config.model === model ? { ...config, ...patch } : config
+    ))
+    updateProfile(profile.id, { model_configs: configs })
+  }
+
+  const toggleModelCapability = (profile: LLMProfile, model: string, capability: ModelCapability) => {
+    const config = getModelConfigs(profile).find((item) => item.model === model)
+    if (!config) return
+    const capabilities = config.capabilities.includes(capability)
+      ? config.capabilities.filter((item) => item !== capability)
+      : [...config.capabilities, capability]
+    updateModelConfig(profile, model, { capabilities })
+  }
 
   const fetchModels = async (profile: LLMProfile) => {
     setFetchingModelsId(profile.id)
@@ -454,6 +510,64 @@ export function SettingsDialog({ open, settings, onClose, onSave }: SettingsDial
                             className="mt-1.5 w-full rounded-2xl border border-black/10 bg-white px-3 py-2.5 text-sm text-surface-900 outline-none focus:border-surface-500"
                           />
                         </label>
+                        <div className="rounded-2xl border border-black/[0.06] bg-[#f8f5ee]/70 p-3">
+                          <div className="mb-2 flex items-center justify-between gap-3">
+                            <div>
+                              <div className="text-xs font-bold text-surface-700">模型能力</div>
+                              <div className="mt-0.5 text-[11px] font-normal text-surface-400">勾选后，系统会按任务自动选择对应模型</div>
+                            </div>
+                            <span className="rounded-full bg-white px-2 py-1 text-[10px] font-semibold text-surface-400">未测试模型显示为待确认</span>
+                          </div>
+                          <div className="space-y-2">
+                            {getModelConfigs(profile).map((config) => (
+                              <div key={config.model} className="rounded-xl border border-black/[0.06] bg-white/80 p-2.5">
+                                <div className="flex items-center justify-between gap-2">
+                                  <div className="min-w-0 truncate font-mono text-[11px] font-semibold text-surface-700" title={config.model}>{config.model}</div>
+                                  <div className="flex shrink-0 items-center gap-2">
+                                    <select
+                                      value={config.priority}
+                                      onChange={(event) => updateModelConfig(profile, config.model, { priority: Number(event.target.value) || 0 })}
+                                      className="rounded-lg border border-black/10 bg-white px-1.5 py-1 text-[10px] text-surface-600 outline-none"
+                                      aria-label={`${config.model} 优先级`}
+                                    >
+                                      {[0, 1, 2, 3].map((priority) => <option key={priority} value={priority}>优先级 {priority}</option>)}
+                                    </select>
+                                    <label className="inline-flex items-center gap-1 text-[10px] font-semibold text-surface-500">
+                                      <input
+                                        type="checkbox"
+                                        checked={config.enabled}
+                                        onChange={(event) => updateModelConfig(profile, config.model, { enabled: event.target.checked })}
+                                      />
+                                      启用
+                                    </label>
+                                  </div>
+                                </div>
+                                <div className="mt-2 flex flex-wrap gap-1.5">
+                                  {capabilityOptions.map((capability) => {
+                                    const selected = config.capabilities.includes(capability.value)
+                                    return (
+                                      <button
+                                        key={capability.value}
+                                        type="button"
+                                        onClick={() => toggleModelCapability(profile, config.model, capability.value)}
+                                        className={`rounded-full border px-2 py-1 text-[10px] font-semibold transition-colors ${selected ? 'border-surface-950 bg-surface-950 text-white' : 'border-black/10 bg-white text-surface-400 hover:border-surface-400 hover:text-surface-700'}`}
+                                        aria-pressed={selected}
+                                      >
+                                        {capability.label}
+                                      </button>
+                                    )
+                                  })}
+                                  <span className={`rounded-full px-2 py-1 text-[10px] font-semibold ${config.status === 'available' ? 'bg-emerald-50 text-emerald-700' : config.status === 'unavailable' ? 'bg-red-50 text-red-700' : 'bg-amber-50 text-amber-700'}`}>
+                                    {config.status === 'available' ? '可用' : config.status === 'unavailable' ? '不可用' : '待确认'}
+                                  </span>
+                                </div>
+                              </div>
+                            ))}
+                            {getModelConfigs(profile).length === 0 && (
+                              <div className="py-2 text-center text-[11px] text-surface-400">请先填写模型名或从 Base URL 获取模型</div>
+                            )}
+                          </div>
+                        </div>
                       </div>
                     </div>
                   )

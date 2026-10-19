@@ -240,6 +240,7 @@ async fn test_llm_connection(
         api_keys: payload.api_keys,
         models: vec![model.to_string()],
         default_model: model.to_string(),
+        model_configs: vec![],
         api_key: payload.api_key,
         has_api_key: false,
     };
@@ -299,6 +300,9 @@ pub fn default_settings() -> AppSettings {
         },
         models,
         default_model: cfg.llm_model.clone(),
+        // 旧的启动配置只代表文本对话。媒体模型仍由独立的
+        // LLM_IMAGE_* / LLM_VIDEO_* 配置回退，避免同名模型被误判为全能力。
+        model_configs: configured_text_model_configs(cfg),
         api_key: None,
         has_api_key: !cfg.llm_api_key.is_empty(),
     };
@@ -333,6 +337,33 @@ fn configured_models(cfg: &crate::config::Config) -> Vec<String> {
         }
     }
     models
+}
+
+fn configured_text_model_configs(
+    cfg: &crate::config::Config,
+) -> Vec<crate::models::LlmModelConfig> {
+    cfg.llm_text_models
+        .iter()
+        .filter_map(|model| {
+            let model = model.trim();
+            if model.is_empty() {
+                return None;
+            }
+            Some(crate::models::LlmModelConfig {
+                model: model.to_string(),
+                capabilities: vec![
+                    crate::models::ModelCapability::Text,
+                    crate::models::ModelCapability::ToolCalling,
+                    crate::models::ModelCapability::Vision,
+                ],
+                enabled: true,
+                priority: 0,
+                status: crate::models::ModelAvailability::Unknown,
+                last_checked_at: None,
+                last_error: None,
+            })
+        })
+        .collect()
 }
 
 fn builtin_mcp_servers() -> Vec<McpServerConfig> {
@@ -400,6 +431,18 @@ pub fn normalize_settings(mut settings: AppSettings) -> Result<AppSettings, AppE
         {
             profile.default_model = profile.models[0].clone();
         }
+        let existing_configs = profile.model_configs.clone();
+        profile.model_configs = profile
+            .models
+            .iter()
+            .map(|model| {
+                existing_configs
+                    .iter()
+                    .find(|config| config.model == *model)
+                    .cloned()
+                    .unwrap_or_else(|| crate::llm::routing::legacy_model_config(model))
+            })
+            .collect();
         profile.has_api_key = !profile.api_keys.is_empty();
     }
 
@@ -518,6 +561,7 @@ pub fn import_startup_llm_profile(settings: &mut AppSettings) {
         api_keys: startup_keys,
         models,
         default_model: model.to_string(),
+        model_configs: vec![],
         api_key: None,
         has_api_key: !cfg.llm_api_key.trim().is_empty(),
     });

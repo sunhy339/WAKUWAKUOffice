@@ -42,8 +42,29 @@ export interface LLMProfile {
   api_keys?: string[];
   models: string[];
   default_model: string;
+  model_configs?: LLMModelConfig[];
   api_key?: string;
   has_api_key?: boolean;
+}
+
+export type ModelCapability =
+  | 'text'
+  | 'tool_calling'
+  | 'vision'
+  | 'image_generation'
+  | 'image_edit'
+  | 'video_generation'
+
+export type ModelAvailability = 'unknown' | 'available' | 'unavailable'
+
+export interface LLMModelConfig {
+  model: string;
+  capabilities: ModelCapability[];
+  enabled: boolean;
+  priority: number;
+  status: ModelAvailability;
+  last_checked_at?: string;
+  last_error?: string;
 }
 
 export interface BasicSettings {

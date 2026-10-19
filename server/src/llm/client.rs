@@ -7,6 +7,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 use tracing::debug;
 
+use super::routing::{select_model, ModelRequirement};
 use super::types::*;
 use crate::models::{ChatAttachment, ChatMessage, LlmProfileConfig};
 
@@ -68,6 +69,7 @@ fn apply_profile(
     preferred_model: Option<&str>,
     active_model: Option<&str>,
     scope: &str,
+    requirement: ModelRequirement,
 ) {
     if !profile.base_url.trim().is_empty() {
         client.base_url = profile.base_url.trim_end_matches('/').to_string();
@@ -86,34 +88,29 @@ fn apply_profile(
     let keys = profile_api_keys(profile);
     client.api_keys = rotate_keys(scope, keys);
 
-    let requested_model = preferred_model.filter(|model| {
-        profile.models.iter().any(|item| item == *model) && is_chat_compatible_model(model)
-    });
-    client.model = requested_model
-        .map(|item| item.to_string())
-        .or_else(|| {
-            active_model.and_then(|model| {
-                if profile.models.iter().any(|item| item == model)
-                    && is_chat_compatible_model(model)
-                {
-                    Some(model.to_string())
-                } else {
-                    None
-                }
-            })
-        })
-        .or_else(|| {
-            if is_chat_compatible_model(&profile.default_model) {
-                Some(profile.default_model.clone())
-            } else {
-                profile
-                    .models
-                    .iter()
-                    .find(|item| is_chat_compatible_model(item))
-                    .cloned()
-            }
-        })
-        .unwrap_or_else(|| profile.default_model.clone());
+    let selected_preference = preferred_model.or(active_model);
+    match select_model(profile, selected_preference, requirement) {
+        Some(route) => client.model = route.model,
+        None => {
+            client.model = profile.default_model.clone();
+            client.route_error = Some(format!(
+                "模型服务「{}」没有配置支持 {} 能力的可用模型",
+                profile.name,
+                requirement_label(requirement),
+            ));
+        }
+    }
+}
+
+fn requirement_label(requirement: ModelRequirement) -> &'static str {
+    match requirement {
+        ModelRequirement::Text => "文本",
+        ModelRequirement::ToolCalling => "工具调用",
+        ModelRequirement::Vision => "视觉理解",
+        ModelRequirement::ImageGeneration => "文生图",
+        ModelRequirement::ImageEdit => "图生图",
+        ModelRequirement::VideoGeneration => "视频生成",
+    }
 }
 
 fn should_retry_with_next_key(status: reqwest::StatusCode) -> bool {
@@ -131,6 +128,7 @@ pub struct LlmClient {
     wire_api: String,
     reasoning_effort: String,
     timeout: Duration,
+    route_error: Option<String>,
 }
 
 impl LlmClient {
@@ -153,6 +151,7 @@ impl LlmClient {
             wire_api: cfg.llm_text_wire_api.clone(),
             reasoning_effort: cfg.llm_text_reasoning_effort.clone(),
             timeout: Duration::from_millis(cfg.llm_chat_timeout_ms),
+            route_error: None,
         }
     }
 
@@ -162,11 +161,26 @@ impl LlmClient {
         scope: &str,
     ) -> Self {
         let mut client = Self::new();
-        apply_profile(&mut client, profile, preferred_model, None, scope);
+        apply_profile(
+            &mut client,
+            profile,
+            preferred_model,
+            None,
+            scope,
+            ModelRequirement::Text,
+        );
         client
     }
 
     pub async fn for_user(user_id: &str, preferred_model: Option<&str>) -> Self {
+        Self::for_user_with_requirement(user_id, preferred_model, ModelRequirement::Text).await
+    }
+
+    pub async fn for_user_with_requirement(
+        user_id: &str,
+        preferred_model: Option<&str>,
+        requirement: ModelRequirement,
+    ) -> Self {
         let mut client = Self::new();
         let pool = crate::state::db_pool();
 
@@ -187,6 +201,7 @@ impl LlmClient {
                     preferred_model,
                     Some(settings.active_model.as_str()),
                     &format!("user:{user_id}:profile:{}", profile.id),
+                    requirement,
                 );
             }
         } else if let Some(model) =
@@ -217,6 +232,9 @@ impl LlmClient {
         tools: Option<&[FunctionDef]>,
         user_attachments: Option<&[ChatAttachment]>,
     ) -> Result<ChatCompletionResponse> {
+        if let Some(error) = &self.route_error {
+            return Err(anyhow!(error.clone()));
+        }
         let has_image_attachments = has_image_attachments(user_attachments);
         let req = ChatCompletionRequest {
             model: self.model.clone(),

@@ -7,9 +7,7 @@ use tokio::time::sleep;
 use crate::agent::tool::{OfficeTool, ToolArtifact, ToolContext, ToolResult};
 
 use super::video_generate::{collect_video_audios, collect_video_refs, normalize_aspect_ratio};
-use crate::agent::tools::agnes_media::{
-    agnes_video_model, get_json, http_client, post_json, resolve_video_credentials,
-};
+use crate::agent::tools::agnes_media::{get_json, http_client, post_json, resolve_video_route};
 
 pub struct VideoBatchGenerateTool;
 
@@ -176,14 +174,15 @@ impl OfficeTool for VideoBatchGenerateTool {
         );
 
         // ---- Agnes 凭证 ----
-        let credentials = match resolve_video_credentials(&ctx.user_id) {
-            Ok(c) => c,
+        let media_route = match resolve_video_route(&ctx.user_id).await {
+            Ok(route) => route,
             Err(err) => {
                 return ToolResult::err(format!("Agnes 凭证不可用：{err}"));
             }
         };
 
-        let video_model = agnes_video_model();
+        let credentials = media_route.credentials;
+        let video_model = media_route.model;
         let client = match http_client(Duration::from_secs(90)) {
             Ok(c) => c,
             Err(err) => {

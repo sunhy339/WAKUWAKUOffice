@@ -23,6 +23,69 @@ pub struct AuthModeResponse {
     pub mode: String,
 }
 
+/// 模型可以被路由到的业务能力。
+///
+/// 这组值是内部稳定契约，不直接依赖具体供应商的模型命名规则。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelCapability {
+    Text,
+    ToolCalling,
+    Vision,
+    ImageGeneration,
+    ImageEdit,
+    VideoGeneration,
+}
+
+impl ModelCapability {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Text => "text",
+            Self::ToolCalling => "tool_calling",
+            Self::Vision => "vision",
+            Self::ImageGeneration => "image_generation",
+            Self::ImageEdit => "image_edit",
+            Self::VideoGeneration => "video_generation",
+        }
+    }
+}
+
+/// 能力探测的当前状态。unknown 不代表不可用，只代表尚未完成主动探测。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelAvailability {
+    Unknown,
+    Available,
+    Unavailable,
+}
+
+impl Default for ModelAvailability {
+    fn default() -> Self {
+        Self::Unknown
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmModelConfig {
+    pub model: String,
+    #[serde(default)]
+    pub capabilities: Vec<ModelCapability>,
+    #[serde(default = "default_model_enabled")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub priority: i32,
+    #[serde(default)]
+    pub status: ModelAvailability,
+    #[serde(default)]
+    pub last_checked_at: Option<String>,
+    #[serde(default)]
+    pub last_error: Option<String>,
+}
+
+fn default_model_enabled() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmProfileConfig {
     pub id: String,
@@ -41,6 +104,9 @@ pub struct LlmProfileConfig {
     pub api_keys: Vec<String>,
     pub models: Vec<String>,
     pub default_model: String,
+    /// 按模型记录能力；为空时由兼容层根据旧的 models 字段推导。
+    #[serde(default)]
+    pub model_configs: Vec<LlmModelConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
     #[serde(default)]

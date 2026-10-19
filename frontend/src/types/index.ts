@@ -247,9 +247,100 @@ export interface AgentTraceEvent {
 }
 
 // ===== SSE 事件 =====
-export interface ChatSSEEvent {
-  event: 'message' | 'slide_update' | 'project_update' | 'artifact_update' | 'tool_result' | 'state_update' | 'done' | 'error';
-  data: any;
+export type ChatSSEEventName =
+  | 'message'
+  | 'slide_update'
+  | 'project_update'
+  | 'artifact_update'
+  | 'tool_result'
+  | 'state_update'
+  | 'done'
+  | 'error';
+
+export type ChatStreamPhase = 'idle' | 'thinking' | 'generating' | 'finishing' | 'done' | 'error';
+
+export interface ChatMessageEventData {
+  text?: string;
+  session_id?: string;
+  project_id?: string;
+  start?: boolean;
+}
+
+export interface ChatStateUpdateEventData {
+  phase?: string;
+  step?: string;
+  detail?: string;
+  at?: string;
+  attachment_count?: number;
+}
+
+export interface ChatToolResultEventData {
+  tool?: string;
+  success?: boolean;
+  result?: Record<string, any>;
+  error?: string | null;
+}
+
+export interface ChatArtifactUpdateEventData {
+  artifact?: Artifact;
+  artifacts?: Artifact[];
+  session_id?: string;
+  tool_kind?: ToolKind;
+}
+
+export interface ChatProjectUpdateEventData {
+  project_id?: string;
+  title?: string;
+  theme?: string;
+  slides?: Slide[];
+  slide_count?: number;
+  total_slides?: number;
+  history?: ProjectHistoryEntry[];
+  current_index?: number;
+}
+
+export type ChatSlideUpdateEventData = ChatProjectUpdateEventData;
+
+export interface ChatDoneEventData {
+  session_id?: string;
+  summary?: string;
+  artifacts?: Artifact[];
+  new_artifacts?: Artifact[];
+  project_id?: string;
+}
+
+export interface ChatErrorEventData {
+  message?: string;
+  detail?: string;
+}
+
+/**
+ * SSE 事件负载映射。
+ * 保留字符串索引签名，允许服务端未来增加事件而不破坏旧版前端。
+ */
+export interface ChatSSEEventDataMap {
+  [event: string]: any;
+  message: ChatMessageEventData;
+  slide_update: ChatSlideUpdateEventData;
+  project_update: ChatProjectUpdateEventData;
+  artifact_update: ChatArtifactUpdateEventData;
+  tool_result: ChatToolResultEventData;
+  state_update: ChatStateUpdateEventData;
+  done: ChatDoneEventData;
+  error: ChatErrorEventData;
+}
+
+export interface ChatSSEEvent<TEvent extends string = string> {
+  /** 服务端事件名；未知事件会被保留，方便兼容后端增量发布。 */
+  event: TEvent;
+  /** 已解析的 JSON 负载；非 JSON 数据以字符串保留。 */
+  data: ChatSSEEventDataMap[TEvent];
+  /** 本次连接内由前端分配的单调递增序号。 */
+  sequence: number;
+  /** 前端收到事件的时间，不代表服务端产生时间。 */
+  received_at: string;
+  /** 是否属于当前已知事件集合。 */
+  known: boolean;
 }
 
 // ===== 文件管理 =====

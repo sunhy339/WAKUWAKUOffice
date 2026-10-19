@@ -1216,7 +1216,8 @@ export default function Studio() {
         inferredTool,
         selectedModel,
         pendingAttachments,
-        (event, data) => {
+        (sseEvent) => {
+          const { event, data } = sseEvent
           switch (event) {
             case 'message':
               setStreamPhase(data.start ? 'thinking' : 'finishing')

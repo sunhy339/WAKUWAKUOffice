@@ -1,6 +1,7 @@
 import axios from 'axios';
 import { useAuthStore } from '@/stores/auth-store';
-import type { TokenResponse, ToolKind, Artifact, PersistedSession, AppSettings, MCPServiceConfig, ChatAttachment } from '@/types';
+import { normalizeChatSseEvent, parseSseData } from '@/lib/chat-events';
+import type { TokenResponse, ToolKind, Artifact, PersistedSession, AppSettings, MCPServiceConfig, ChatAttachment, ChatSSEEvent } from '@/types';
 
 const API_BASE = '/api';
 
@@ -157,7 +158,7 @@ export const chatApi = {
     toolKind: ToolKind,
     model: string | null,
     attachments: ChatAttachment[],
-    onEvent: (event: string, data: any) => void,
+    onEvent: (event: ChatSSEEvent) => void,
     token: string,
     signal?: AbortSignal,
     toolConfig?: Record<string, any>
@@ -206,6 +207,44 @@ export const chatApi = {
 
     let buffer = '';
     let currentEvent = 'message';
+    let currentData: string[] = [];
+    let sequence = 0;
+
+    const dispatchFrame = () => {
+      if (currentData.length === 0) {
+        currentEvent = 'message';
+        return;
+      }
+
+      const event = normalizeChatSseEvent(
+        currentEvent,
+        parseSseData(currentData.join('\n')),
+        ++sequence,
+      );
+      onEvent(event);
+      currentEvent = 'message';
+      currentData = [];
+    };
+
+    const consumeLine = (rawLine: string) => {
+      const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
+
+      if (line === '') {
+        dispatchFrame();
+        return;
+      }
+
+      // SSE 注释通常用于心跳，不能进入业务事件负载。
+      if (line.startsWith(':')) return;
+
+      if (line.startsWith('event:')) {
+        currentEvent = line.slice(6).trim() || 'message';
+      } else if (line.startsWith('data:')) {
+        const value = line.slice(5);
+        currentData.push(value.startsWith(' ') ? value.slice(1) : value);
+      }
+    };
+
     try {
       while (true) {
         const { done, value } = await reader.read();
@@ -216,23 +255,13 @@ export const chatApi = {
         buffer = lines.pop() || '';
 
         for (const line of lines) {
-          if (line.startsWith('event:')) {
-            currentEvent = line.slice(6).trim();
-          } else if (line.startsWith('data:')) {
-            const dataStr = line.slice(5).trim();
-            if (dataStr) {
-              try {
-                const data = JSON.parse(dataStr);
-                onEvent(currentEvent, data);
-              } catch {
-                onEvent(currentEvent, dataStr);
-              }
-            }
-          } else if (line.trim() === '') {
-            currentEvent = 'message';
-          }
+          consumeLine(line);
         }
       }
+
+      buffer += decoder.decode();
+      if (buffer) consumeLine(buffer);
+      dispatchFrame();
     } finally {
       reader.releaseLock();
     }

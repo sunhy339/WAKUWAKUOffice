@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { Artifact, PPTProject, Slide, ChatMessage, ToolKind } from '@/types';
+import type { Artifact, PPTProject, Slide, ChatMessage, ChatStreamPhase, ToolKind } from '@/types';
 
 interface ConversationState {
   project: PPTProject | null;
@@ -14,7 +14,7 @@ interface ConversationState {
   activeTool: ToolKind;
   input: string;
   streamStatus: string;
-  streamPhase: 'idle' | 'thinking' | 'generating' | 'finishing' | 'done' | 'error';
+  streamPhase: ChatStreamPhase;
   processLogs: string[];
   attachments: any[];
   selectedTheme: string;

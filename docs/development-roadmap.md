@@ -324,4 +324,11 @@
 | Rust 格式检查 | 通过 | `cargo fmt --manifest-path server/Cargo.toml --all -- --check` |
 | 用户验收 | 待进行 | 需在页面打开 PPT、选择非最后一页并实际提交一次修改 |
 
+### 服务器回归记录
+
+- 已修复 PPT 文件项目 ID 写入通用会话外键导致的 HTTP 500；PPT 请求现在只保留工具上下文中的文件项目 ID，会话仍使用合法的通用项目关联。
+- 远程服务器真实验证通过：临时账号创建两页 PPT，提交第一页修改后收到 `state_update`、`slide_update`、`artifact_update`、`message`、`done` 完整事件链；目标页标题发生变化，第二页的 ID、标题、文本和几何信息保持不变。
+- 服务器部署后的 `GET /api/health` 返回 200，`wakuoffice` 与 MinIO 保持 healthy；原有 `app-src` 容器未重启。
+- 临时测试账号、PPT 项目和会话已清理；用户验收仍待在浏览器中实际操作确认。
+
 本项仍保持“待验收”，用户确认前不标记为完成。

@@ -899,6 +899,35 @@ async fn chat_stream(
         crate::llm::LlmClient::for_user(&user.0.id, req.model.as_deref()).await,
     );
 
+    // 会话表的 project_id 是通用 projects 表的外键；PPT 文件项目使用独立的
+    // JSON 存储，不能把 PPT project_id 直接写入 sessions，否则首个单页编辑
+    // 请求会在数据库层失败。PPT 项目 ID 仍会继续传给 Agent 工具上下文。
+    let session_project_id = if let Some(project_id) = req.project_id.as_deref() {
+        if project_repo::find_by_id(&pool, project_id, &user.0.id)
+            .await?
+            .is_some()
+        {
+            Some(project_id.to_string())
+        } else if let Some(ppt_project) = project_repo::load_ppt_project(project_id)? {
+            let is_ppt_request = req.tool_kind.as_deref() == Some("ppt")
+                || req
+                    .target
+                    .as_ref()
+                    .map(|target| target.operation == "edit_slide")
+                    .unwrap_or(false);
+            if is_ppt_request && ppt_project.owner_id == user.0.id {
+                // PPT 文件项目不写入 sessions.project_id（该字段是通用项目外键）。
+                None
+            } else {
+                return Err(AppError::NotFound("项目不存在".into()));
+            }
+        } else {
+            return Err(AppError::NotFound("项目不存在".into()));
+        }
+    } else {
+        None
+    };
+
     // 创建或获取会话
     let session = if let Some(ref sid) = req.session_id {
         session_repo::find_by_id(&pool, sid)
@@ -918,7 +947,7 @@ async fn chat_stream(
         session_repo::create(
             &pool,
             &user.0.id,
-            req.project_id.as_deref(),
+            session_project_id.as_deref(),
             resolved_tool_kind.as_deref(),
             &title,
         )

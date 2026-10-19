@@ -1174,7 +1174,8 @@ export default function Studio() {
       setInputRefs([])
     }
     setStreaming(true)
-    setFollowLatestSlide(true)
+    // 单页编辑必须保留用户当前选中的页；只有整套 PPT 生成时才跟随最新页。
+    setFollowLatestSlide(target?.operation !== 'edit_slide')
     setPptProgress(null)
     setStreamPhase('thinking')
     setStreamStatus(pendingAttachments.length > 0 ? '正在整理消息与附件...' : '正在理解需求...')

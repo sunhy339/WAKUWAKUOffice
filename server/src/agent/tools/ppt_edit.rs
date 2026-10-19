@@ -90,6 +90,21 @@ fn target_slide_index(project: &PptProject, slide_id: &str) -> Option<usize> {
     project.slides.iter().position(|slide| slide.id == slide_id)
 }
 
+fn replace_target_slide(
+    project: &mut PptProject,
+    slide_index: usize,
+    edited_slide: Slide,
+) -> Result<(), String> {
+    let original_slide = project
+        .slides
+        .get(slide_index)
+        .ok_or_else(|| "指定的幻灯片不存在，可能已被删除或重新排序".to_string())?
+        .clone();
+    validate_edited_slide(&original_slide, &edited_slide)?;
+    project.slides[slide_index] = edited_slide;
+    Ok(())
+}
+
 fn extract_slide_payload(value: serde_json::Value) -> serde_json::Value {
     value.get("slide").cloned().unwrap_or(value)
 }
@@ -274,15 +289,14 @@ impl OfficeTool for PptEditTool {
             .chars()
             .take(240)
             .collect::<String>();
-        let mut edited_slide: Slide = match serde_json::from_value(extract_slide_payload(payload)) {
+        let edited_slide: Slide = match serde_json::from_value(extract_slide_payload(payload)) {
             Ok(slide) => slide,
             Err(error) => return ToolResult::err(format!("PPT 单页修改结果不完整: {error}")),
         };
-        if let Err(error) = validate_edited_slide(&original_slide, &edited_slide) {
+        if let Err(error) = replace_target_slide(&mut project, slide_index, edited_slide) {
             return ToolResult::err(error);
         }
-
-        project.slides[slide_index] = edited_slide.clone();
+        let edited_slide = project.slides[slide_index].clone();
         let now = chrono::Utc::now().to_rfc3339();
         project.updated_at = now.clone();
         project
@@ -448,5 +462,41 @@ mod tests {
 
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("坐标无效"));
+    }
+
+    #[test]
+    fn replacing_target_slide_keeps_other_slides_unchanged() {
+        let original_target = sample_slide();
+        let untouched = Slide {
+            id: "slide-2".to_string(),
+            title: Some("不应改变".to_string()),
+            ..original_target.clone()
+        };
+        let mut project = PptProject {
+            id: "project-1".to_string(),
+            title: "测试演示文稿".to_string(),
+            theme: "default".to_string(),
+            slides: vec![original_target.clone(), untouched.clone()],
+            history: Some(vec![]),
+            layout: "16x9".to_string(),
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+            owner_id: "user-1".to_string(),
+        };
+        let mut edited = original_target.clone();
+        edited.title = Some("已修改".to_string());
+        edited.elements[0].text = Some("新的内容".to_string());
+
+        replace_target_slide(&mut project, 0, edited.clone()).expect("目标页应能替换");
+
+        assert_eq!(project.slides[0].id, edited.id);
+        assert_eq!(project.slides[0].title, edited.title);
+        assert_eq!(project.slides[0].elements[0].text, edited.elements[0].text);
+        assert_eq!(project.slides[1].id, untouched.id);
+        assert_eq!(project.slides[1].title, untouched.title);
+        assert_eq!(
+            project.slides[1].elements[0].text,
+            untouched.elements[0].text
+        );
     }
 }

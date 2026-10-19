@@ -1,10 +1,14 @@
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use reqwest::StatusCode;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::auth::middleware::AuthUser;
 use crate::db::settings_repo;
 use crate::error::AppError;
+use crate::llm::client::LlmClient;
+use crate::models::ChatMessage;
 use crate::models::{AppSettings, BasicSettings, LlmProfileConfig, McpServerConfig};
 use crate::state;
 use eventsource_stream::Eventsource;
@@ -13,7 +17,269 @@ use futures::StreamExt;
 pub fn router() -> Router {
     Router::new()
         .route("/api/settings", get(get_settings).put(save_settings))
+        .route("/api/settings/models", post(fetch_models))
+        .route("/api/settings/llm/test", post(test_llm_connection))
         .route("/api/settings/mcp/test", post(test_mcp_service))
+}
+
+#[derive(Debug, Deserialize)]
+struct FetchModelsRequest {
+    base_url: String,
+    #[serde(default)]
+    api_keys: Vec<String>,
+    #[serde(default)]
+    api_key: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct FetchModelsResponse {
+    models: Vec<String>,
+    endpoint: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct TestLlmRequest {
+    base_url: String,
+    #[serde(default)]
+    api_keys: Vec<String>,
+    #[serde(default)]
+    api_key: Option<String>,
+    model: String,
+    #[serde(default)]
+    wire_api: String,
+    #[serde(default)]
+    reasoning_effort: String,
+}
+
+#[derive(Debug, Serialize)]
+struct TestLlmResponse {
+    ok: bool,
+    message: String,
+    model: String,
+    wire_api: String,
+    elapsed_ms: u128,
+}
+
+fn models_endpoint(base_url: &str) -> Result<String, AppError> {
+    let mut endpoint = base_url.trim().trim_end_matches('/').to_string();
+    if endpoint.is_empty() {
+        return Err(AppError::BadRequest("Base URL 不能为空".into()));
+    }
+    if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
+        return Err(AppError::BadRequest(
+            "Base URL 必须以 http:// 或 https:// 开头".into(),
+        ));
+    }
+    if endpoint.ends_with("/chat/completions") {
+        endpoint.truncate(endpoint.len() - "/chat/completions".len());
+    }
+    if !endpoint.ends_with("/models") {
+        endpoint.push_str("/models");
+    }
+    reqwest::Url::parse(&endpoint)
+        .map_err(|_| AppError::BadRequest("Base URL 格式不正确".into()))?;
+    Ok(endpoint)
+}
+
+fn unique_api_keys(payload: &FetchModelsRequest) -> Vec<String> {
+    let mut keys = payload.api_keys.clone();
+    if let Some(api_key) = &payload.api_key {
+        keys.push(api_key.clone());
+    }
+    let mut unique = Vec::new();
+    for key in keys {
+        let key = key.trim();
+        if !key.is_empty() && !unique.iter().any(|item: &String| item == key) {
+            unique.push(key.to_string());
+        }
+    }
+    unique
+}
+
+fn model_ids(value: serde_json::Value) -> Vec<String> {
+    let candidates = if let Some(items) = value.as_array() {
+        items.clone()
+    } else {
+        value
+            .get("data")
+            .and_then(|items| items.as_array())
+            .or_else(|| value.get("models").and_then(|items| items.as_array()))
+            .cloned()
+            .unwrap_or_default()
+    };
+
+    let mut models = Vec::new();
+    for item in candidates {
+        let model = item
+            .as_str()
+            .map(str::to_string)
+            .or_else(|| {
+                item.get("id")
+                    .and_then(|id| id.as_str())
+                    .map(str::to_string)
+            })
+            .or_else(|| {
+                item.get("name")
+                    .and_then(|name| name.as_str())
+                    .map(str::to_string)
+            });
+        if let Some(model) = model {
+            let model = model.trim();
+            if !model.is_empty() && !models.iter().any(|item| item == model) {
+                models.push(model.to_string());
+            }
+        }
+    }
+    models.sort_by_key(|item| item.to_lowercase());
+    models
+}
+
+async fn fetch_models(
+    _user: AuthUser,
+    Json(payload): Json<FetchModelsRequest>,
+) -> Result<Json<FetchModelsResponse>, AppError> {
+    let endpoint = models_endpoint(&payload.base_url)?;
+    let keys = unique_api_keys(&payload);
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|error| AppError::Internal(anyhow::anyhow!("构建模型查询客户端失败: {error}")))?;
+
+    let attempts = if keys.is_empty() {
+        vec![String::new()]
+    } else {
+        keys
+    };
+    let mut last_message = String::from("模型服务未返回可用结果");
+
+    for (index, api_key) in attempts.iter().enumerate() {
+        let mut request = client.get(&endpoint).header("Accept", "application/json");
+        if !api_key.is_empty() {
+            request = request.bearer_auth(api_key);
+        }
+        let response = match request.send().await {
+            Ok(response) => response,
+            Err(error) => {
+                last_message = format!("连接模型服务失败: {error}");
+                if index + 1 < attempts.len() {
+                    continue;
+                }
+                break;
+            }
+        };
+
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        if !status.is_success() {
+            last_message = format!("模型服务返回 HTTP {}", status.as_u16());
+            if matches!(
+                status,
+                StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN | StatusCode::TOO_MANY_REQUESTS
+            ) || status.is_server_error()
+            {
+                if index + 1 < attempts.len() {
+                    continue;
+                }
+            }
+            return Err(AppError::BadRequest(last_message));
+        }
+
+        let value: serde_json::Value = serde_json::from_str(&body)
+            .map_err(|_| AppError::BadRequest("模型服务返回的 /models 数据不是有效 JSON".into()))?;
+        let models = model_ids(value);
+        if models.is_empty() {
+            return Err(AppError::BadRequest(
+                "模型服务返回成功，但没有找到模型 ID".into(),
+            ));
+        }
+        return Ok(Json(FetchModelsResponse { models, endpoint }));
+    }
+
+    Err(AppError::BadRequest(last_message))
+}
+
+async fn test_llm_connection(
+    user: AuthUser,
+    Json(payload): Json<TestLlmRequest>,
+) -> Result<Json<TestLlmResponse>, AppError> {
+    let base_url = payload.base_url.trim();
+    let model = payload.model.trim();
+    let wire_api = if payload.wire_api.trim().is_empty() {
+        "chat_completions"
+    } else {
+        payload.wire_api.trim()
+    };
+    if base_url.is_empty() {
+        return Err(AppError::BadRequest("Base URL 不能为空".into()));
+    }
+    if !base_url.starts_with("http://") && !base_url.starts_with("https://") {
+        return Err(AppError::BadRequest(
+            "Base URL 必须以 http:// 或 https:// 开头".into(),
+        ));
+    }
+    if model.is_empty() {
+        return Err(AppError::BadRequest("请选择或填写要测试的模型".into()));
+    }
+    if !matches!(wire_api, "chat_completions" | "responses") {
+        return Err(AppError::BadRequest(
+            "Wire API 只支持 chat_completions 或 responses".into(),
+        ));
+    }
+
+    let profile = LlmProfileConfig {
+        id: "connection-test".into(),
+        name: "连接测试".into(),
+        base_url: base_url.to_string(),
+        provider: "OpenAI Compatible".into(),
+        wire_api: wire_api.to_string(),
+        reasoning_effort: if payload.reasoning_effort.trim().is_empty() {
+            "medium".into()
+        } else {
+            payload.reasoning_effort.trim().to_string()
+        },
+        api_keys: payload.api_keys,
+        models: vec![model.to_string()],
+        default_model: model.to_string(),
+        api_key: payload.api_key,
+        has_api_key: false,
+    };
+
+    let started = std::time::Instant::now();
+    let client = LlmClient::from_profile(
+        &profile,
+        Some(model),
+        &format!("user:{}:connection-test", user.0.id),
+    );
+    let messages = [ChatMessage {
+        role: "user".into(),
+        content: "请只回复：连接测试成功".into(),
+        tool_calls: None,
+        tool_call_id: None,
+    }];
+
+    match client.chat(&messages, None).await {
+        Ok(response) if response.choices.first().is_some() => Ok(Json(TestLlmResponse {
+            ok: true,
+            message: "连接成功，模型已返回响应".into(),
+            model: client.model().to_string(),
+            wire_api: wire_api.to_string(),
+            elapsed_ms: started.elapsed().as_millis(),
+        })),
+        Ok(_) => Ok(Json(TestLlmResponse {
+            ok: false,
+            message: "模型服务返回成功，但没有可用响应内容".into(),
+            model: client.model().to_string(),
+            wire_api: wire_api.to_string(),
+            elapsed_ms: started.elapsed().as_millis(),
+        })),
+        Err(error) => Ok(Json(TestLlmResponse {
+            ok: false,
+            message: format!("连接失败：{error}"),
+            model: client.model().to_string(),
+            wire_api: wire_api.to_string(),
+            elapsed_ms: started.elapsed().as_millis(),
+        })),
+    }
 }
 
 pub fn default_settings() -> AppSettings {
@@ -23,6 +289,9 @@ pub fn default_settings() -> AppSettings {
         id: "default".into(),
         name: "默认模型服务".into(),
         base_url: cfg.llm_base_url.clone(),
+        provider: cfg.llm_text_provider.clone(),
+        wire_api: cfg.llm_text_wire_api.clone(),
+        reasoning_effort: cfg.llm_text_reasoning_effort.clone(),
         api_keys: if cfg.llm_api_key.trim().is_empty() {
             vec![]
         } else {
@@ -81,6 +350,21 @@ pub fn normalize_settings(mut settings: AppSettings) -> Result<AppSettings, AppE
         }
         if profile.name.trim().is_empty() {
             profile.name = "未命名模型服务".into();
+        }
+        if profile.provider.trim().is_empty() {
+            profile.provider = "OpenAI Compatible".into();
+        }
+        if profile.wire_api.trim().is_empty() {
+            profile.wire_api = "chat_completions".into();
+        }
+        if !matches!(profile.wire_api.as_str(), "chat_completions" | "responses") {
+            return Err(AppError::BadRequest(format!(
+                "模型服务「{}」的 Wire API 只支持 chat_completions 或 responses",
+                profile.name
+            )));
+        }
+        if profile.reasoning_effort.trim().is_empty() {
+            profile.reasoning_effort = "medium".into();
         }
         let mut api_keys: Vec<String> = Vec::new();
         for api_key in &profile.api_keys {
@@ -154,6 +438,9 @@ pub fn normalize_settings(mut settings: AppSettings) -> Result<AppSettings, AppE
     if settings.basic.app_name.trim().is_empty() {
         settings.basic.app_name = crate::config::config().app_name.clone();
     }
+    if settings.basic.app_name.eq_ignore_ascii_case("walioffice") {
+        settings.basic.app_name = "WaKuOffice".into();
+    }
     if settings.basic.workspace_title.trim().is_empty() {
         settings.basic.workspace_title = "智能办公助手".into();
     }
@@ -225,6 +512,9 @@ pub fn import_startup_llm_profile(settings: &mut AppSettings) {
         id: "startup-env".into(),
         name: "启动配置模型服务".into(),
         base_url: base_url.to_string(),
+        provider: cfg.llm_text_provider.clone(),
+        wire_api: cfg.llm_text_wire_api.clone(),
+        reasoning_effort: cfg.llm_text_reasoning_effort.clone(),
         api_keys: startup_keys,
         models,
         default_model: model.to_string(),
@@ -235,7 +525,9 @@ pub fn import_startup_llm_profile(settings: &mut AppSettings) {
 
 async fn get_settings(user: AuthUser) -> Result<Json<AppSettings>, AppError> {
     let pool = state::db_pool();
-    let settings = settings_repo::find_by_user(&pool, &user.0.id).await?.unwrap_or_else(default_settings);
+    let settings = settings_repo::find_by_user(&pool, &user.0.id)
+        .await?
+        .unwrap_or_else(default_settings);
     Ok(Json(normalize_settings(settings)?))
 }
 
@@ -287,7 +579,7 @@ async fn test_mcp_service(
                 "protocolVersion": "2024-11-05",
                 "capabilities": {},
                 "clientInfo": {
-                    "name": "WaLiOffice",
+                    "name": "WaKuOffice",
                     "version": "0.2.0"
                 }
             }
@@ -442,7 +734,7 @@ async fn test_sse_mcp_service(
                 "protocolVersion": "2024-11-05",
                 "capabilities": {},
                 "clientInfo": {
-                    "name": "WaLiOffice",
+                    "name": "WaKuOffice",
                     "version": "0.2.0"
                 }
             }
@@ -537,4 +829,54 @@ async fn test_sse_mcp_service(
         "message": format!("MCP SSE 服务连接成功，共发现 {} 个工具", tools.len()),
         "tools": tools
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn models_endpoint_normalizes_openai_compatible_urls() {
+        assert_eq!(
+            models_endpoint("https://api.example.com/v1").unwrap(),
+            "https://api.example.com/v1/models"
+        );
+        assert_eq!(
+            models_endpoint("https://api.example.com/v1/").unwrap(),
+            "https://api.example.com/v1/models"
+        );
+        assert_eq!(
+            models_endpoint("https://api.example.com/v1/chat/completions").unwrap(),
+            "https://api.example.com/v1/models"
+        );
+        assert!(models_endpoint("api.example.com/v1").is_err());
+    }
+
+    #[test]
+    fn model_ids_support_common_provider_shapes_and_dedupe() {
+        assert_eq!(
+            model_ids(serde_json::json!({
+                "data": [{"id": "gpt-b"}, {"id": "gpt-a"}, {"id": "gpt-a"}]
+            })),
+            vec!["gpt-a", "gpt-b"]
+        );
+        assert_eq!(
+            model_ids(serde_json::json!({"models": ["model-b", "model-a"]})),
+            vec!["model-a", "model-b"]
+        );
+        assert_eq!(
+            model_ids(serde_json::json!([{"name": "named-model"}, "plain-model"])),
+            vec!["named-model", "plain-model"]
+        );
+    }
+
+    #[test]
+    fn unique_api_keys_trims_and_dedupes_legacy_key() {
+        let payload = FetchModelsRequest {
+            base_url: "https://api.example.com/v1".into(),
+            api_keys: vec![" key-a ".into(), "key-a".into(), "".into()],
+            api_key: Some("key-b".into()),
+        };
+        assert_eq!(unique_api_keys(&payload), vec!["key-a", "key-b"]);
+    }
 }

@@ -474,7 +474,7 @@ export function ChatPanel({
     new Set(
       modelProfiles
         .flatMap((profile) => profile.models || [])
-        .filter((model) => !/^agnes-(image|video)-/i.test(model))
+        .filter((model) => !/^(agnes|gpt)-(image|video)-/i.test(model) && !/^(image|video)-/i.test(model))
     )
   )
 
@@ -597,7 +597,7 @@ export function ChatPanel({
               </div>
               <h1 className="text-3xl font-semibold tracking-tight text-surface-950">今天要做什么？</h1>
               <p className="mt-3 max-w-xl text-sm leading-6 text-surface-500">
-                WaLiOffice 在线智能办公 AI：先分析需求，再决策工具，最后绘制或生成产物。你可以先描述目标，也可以直接选工具开工。
+                WaKuOffice 在线智能办公 AI：先分析需求，再决策工具，最后绘制或生成产物。你可以先描述目标，也可以直接选工具开工。
               </p>
               <div className="mt-7 grid w-full max-w-3xl grid-cols-1 gap-3 sm:grid-cols-2">
                 {starterCards.map((card) => {
@@ -1047,7 +1047,7 @@ export function ChatPanel({
                           <Paperclip className="h-3.5 w-3.5" />
                         </button>
                         <button
-                          onClick={onSend}
+                          onClick={() => onSend()}
                           disabled={!canSend}
                           className="inline-flex h-[30px] items-center gap-1.5 rounded-full bg-surface-950 px-3 text-[11px] font-semibold text-white shadow-[0_1px_2px_rgba(15,23,42,0.18)] transition-all hover:-translate-y-[0.5px] hover:bg-surface-900 hover:shadow-[0_4px_12px_rgba(15,23,42,0.18)] disabled:translate-y-0 disabled:bg-surface-200 disabled:text-surface-400 disabled:shadow-none"
                           title="发送"

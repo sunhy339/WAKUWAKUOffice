@@ -1,5 +1,6 @@
 pub mod file_repo;
 pub mod notification_repo;
+pub mod password_reset_repo;
 pub mod project_repo;
 pub mod session_repo;
 pub mod settings_repo;
@@ -25,7 +26,10 @@ pub async fn init_pool(database_url: &str, data_dir: &str, max_connections: u32)
             .connect(database_url)
             .await?;
         run_migrations_mysql(&mysql_pool).await?;
-        info!("📦 MySQL 数据库已初始化: {}", mask_url_password(database_url));
+        info!(
+            "📦 MySQL 数据库已初始化: {}",
+            mask_url_password(database_url)
+        );
 
         // 再用 AnyPool 连接
         let any_pool = AnyPool::connect(database_url).await?;
@@ -53,7 +57,7 @@ async fn run_migrations_sqlite(pool: &sqlx::SqlitePool) -> Result<()> {
 
     // 检查 sessions 表是否有 order_col 列
     let has_order_col: bool = sqlx::query_scalar(
-        "SELECT COUNT(*) > 0 FROM pragma_table_info('sessions') WHERE name = 'order_col'"
+        "SELECT COUNT(*) > 0 FROM pragma_table_info('sessions') WHERE name = 'order_col'",
     )
     .fetch_one(pool)
     .await
@@ -63,6 +67,53 @@ async fn run_migrations_sqlite(pool: &sqlx::SqlitePool) -> Result<()> {
         sqlx::query("ALTER TABLE sessions ADD COLUMN order_col INTEGER NOT NULL DEFAULT 0")
             .execute(pool)
             .await?;
+    }
+
+    let has_auth_version: bool = sqlx::query_scalar(
+        "SELECT COUNT(*) > 0 FROM pragma_table_info('users') WHERE name = 'auth_version'",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(false);
+
+    if !has_auth_version {
+        sqlx::query("ALTER TABLE users ADD COLUMN auth_version INTEGER NOT NULL DEFAULT 0")
+            .execute(pool)
+            .await?;
+    }
+
+    let reset_tokens_sql = include_str!("../../../migrations/002_password_reset.sql");
+    sqlx::raw_sql(reset_tokens_sql).execute(pool).await?;
+
+    let has_storage_backend: bool = sqlx::query_scalar(
+        "SELECT COUNT(*) > 0 FROM pragma_table_info('files') WHERE name = 'storage_backend'",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(false);
+    let has_storage_key: bool = sqlx::query_scalar(
+        "SELECT COUNT(*) > 0 FROM pragma_table_info('files') WHERE name = 'storage_key'",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(false);
+
+    if !has_storage_backend && !has_storage_key {
+        let storage_sql = include_str!("../../../migrations/003_storage.sql");
+        sqlx::raw_sql(storage_sql).execute(pool).await?;
+    } else {
+        if !has_storage_backend {
+            sqlx::query(
+                "ALTER TABLE files ADD COLUMN storage_backend TEXT NOT NULL DEFAULT 'local'",
+            )
+            .execute(pool)
+            .await?;
+        }
+        if !has_storage_key {
+            sqlx::query("ALTER TABLE files ADD COLUMN storage_key TEXT")
+                .execute(pool)
+                .await?;
+        }
     }
 
     Ok(())
@@ -79,11 +130,57 @@ async fn run_migrations_mysql(pool: &sqlx::MySqlPool) -> Result<()> {
 
     if table_exists {
         info!("📦 MySQL 表已存在，跳过迁移");
-        return Ok(());
+    } else {
+        let sql = include_str!("../../../migrations/001_init_mysql.sql");
+        sqlx::raw_sql(sql).execute(pool).await?;
     }
 
-    let sql = include_str!("../../../migrations/001_init_mysql.sql");
-    sqlx::raw_sql(sql).execute(pool).await?;
+    let has_auth_version: bool = sqlx::query_scalar(
+        "SELECT COUNT(*) > 0 FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'users' AND column_name = 'auth_version'",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(false);
+
+    if !has_auth_version {
+        sqlx::query("ALTER TABLE users ADD COLUMN auth_version BIGINT NOT NULL DEFAULT 0")
+            .execute(pool)
+            .await?;
+    }
+
+    let reset_tokens_sql = include_str!("../../../migrations/002_password_reset_mysql.sql");
+    sqlx::raw_sql(reset_tokens_sql).execute(pool).await?;
+
+    let has_storage_backend: bool = sqlx::query_scalar(
+        "SELECT COUNT(*) > 0 FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'files' AND column_name = 'storage_backend'",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(false);
+    let has_storage_key: bool = sqlx::query_scalar(
+        "SELECT COUNT(*) > 0 FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'files' AND column_name = 'storage_key'",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(false);
+
+    if !has_storage_backend && !has_storage_key {
+        let storage_sql = include_str!("../../../migrations/003_storage_mysql.sql");
+        sqlx::raw_sql(storage_sql).execute(pool).await?;
+    } else {
+        if !has_storage_backend {
+            sqlx::query(
+                "ALTER TABLE files ADD COLUMN storage_backend VARCHAR(32) NOT NULL DEFAULT 'local'",
+            )
+            .execute(pool)
+            .await?;
+        }
+        if !has_storage_key {
+            sqlx::query("ALTER TABLE files ADD COLUMN storage_key VARCHAR(1000) NULL")
+                .execute(pool)
+                .await?;
+        }
+    }
     Ok(())
 }
 

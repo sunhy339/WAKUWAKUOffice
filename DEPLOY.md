@@ -1,4 +1,4 @@
-# WaLiOffice 云服务器部署说明
+# WaKuOffice 云服务器部署说明
 
 ## 完整流程
 
@@ -7,7 +7,7 @@
 ```bash
 # 1. 启动 Docker Desktop
 # 2. 进入项目目录
-cd /Users/fuzhengwei/coding/gitcode/KnowledgePlanet/WaLiOffice/WaLiOffice
+cd /path/to/WAKUWAKUOffice
 
 # 3. 确认 .local-config 已配置阿里云账号
 cat .local-config
@@ -48,6 +48,12 @@ vim .env                 # 修改以下关键配置:
 | `LLM_IMAGE_API_KEY` | 你的图片模型 API Key |
 | `LLM_VIDEO_API_KEY` | 你的视频模型 API Key |
 | `AIPPT_CORS_ORIGINS` | 你的域名或 `http://服务器IP:8000` |
+| `STORAGE_BACKEND` | `local` 或 `s3`；线上建议使用私有 MinIO/S3 |
+| `STORAGE_S3_ENDPOINT` | MinIO/S3 服务地址（使用 `s3` 时必填） |
+| `STORAGE_S3_BUCKET` | 对象存储桶名称（使用 `s3` 时必填） |
+| `STORAGE_S3_ACCESS_KEY` / `STORAGE_S3_SECRET_KEY` | 服务器环境变量中的对象存储凭据，不提交 Git |
+
+线上文件存储采用“数据库元数据 + 对象存储实体”的拆分方式。当前服务器未预装 MinIO；如使用 MinIO，需要先部署并创建私有桶，再在 `.env` 或容器 Secret 中填写 `STORAGE_S3_*` 参数。应用不会把这些密钥返回前端，也不会写入用户设置表。
 
 ```bash
 # 5. 登录阿里云镜像仓库

@@ -1,5 +1,5 @@
 -- ============================================================
--- WaLiOffice MySQL 初始化脚本
+-- WaKuOffice MySQL 初始化脚本
 -- 每次启动会先 DROP 再 CREATE，清空旧数据重建表结构
 -- ============================================================
 
@@ -28,6 +28,7 @@ CREATE TABLE users (
     password_hash VARCHAR(255) NOT NULL,
     avatar VARCHAR(500),
     role VARCHAR(50) NOT NULL DEFAULT 'user',
+    auth_version BIGINT NOT NULL DEFAULT 0,
     created_at VARCHAR(50) NOT NULL,
     updated_at VARCHAR(50) NOT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

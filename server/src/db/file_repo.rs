@@ -18,6 +18,10 @@ pub struct FileRow {
     pub metadata: Option<Value>,
     pub created_at: String,
     pub updated_at: String,
+    #[serde(skip_serializing)]
+    pub storage_backend: String,
+    #[serde(skip_serializing)]
+    pub storage_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -44,7 +48,7 @@ pub async fn list_files(
 ) -> AppResult<Vec<FileRow>> {
     let rows = if let Some(folder_id) = folder_id {
         sqlx::query(
-            "SELECT id, owner_id, name, file_path, file_type, file_size, folder_id, description, metadata, created_at, updated_at
+            "SELECT id, owner_id, name, file_path, file_type, file_size, folder_id, description, metadata, created_at, updated_at, storage_backend, storage_key
              FROM files WHERE owner_id = ? AND folder_id = ? ORDER BY updated_at DESC"
         )
         .bind(owner_id)
@@ -53,7 +57,7 @@ pub async fn list_files(
         .await?
     } else {
         sqlx::query(
-            "SELECT id, owner_id, name, file_path, file_type, file_size, folder_id, description, metadata, created_at, updated_at
+            "SELECT id, owner_id, name, file_path, file_type, file_size, folder_id, description, metadata, created_at, updated_at, storage_backend, storage_key
              FROM files WHERE owner_id = ? AND folder_id IS NULL ORDER BY updated_at DESC"
         )
         .bind(owner_id)
@@ -68,10 +72,14 @@ pub async fn list_files(
     Ok(files)
 }
 
-pub async fn search_files(pool: &DbPool, owner_id: &str, query: Option<&str>) -> AppResult<Vec<FileRow>> {
+pub async fn search_files(
+    pool: &DbPool,
+    owner_id: &str,
+    query: Option<&str>,
+) -> AppResult<Vec<FileRow>> {
     let pattern = format!("%{}%", query.unwrap_or("").trim());
     let rows = sqlx::query(
-        "SELECT id, owner_id, name, file_path, file_type, file_size, folder_id, description, metadata, created_at, updated_at
+        "SELECT id, owner_id, name, file_path, file_type, file_size, folder_id, description, metadata, created_at, updated_at, storage_backend, storage_key
          FROM files
          WHERE owner_id = ? AND (? = '%%' OR name LIKE ? OR COALESCE(description, '') LIKE ?)
          ORDER BY updated_at DESC"
@@ -92,7 +100,7 @@ pub async fn search_files(pool: &DbPool, owner_id: &str, query: Option<&str>) ->
 
 pub async fn get_file(pool: &DbPool, owner_id: &str, id: &str) -> AppResult<Option<FileRow>> {
     let row = sqlx::query(
-        "SELECT id, owner_id, name, file_path, file_type, file_size, folder_id, description, metadata, created_at, updated_at
+        "SELECT id, owner_id, name, file_path, file_type, file_size, folder_id, description, metadata, created_at, updated_at, storage_backend, storage_key
          FROM files WHERE id = ? AND owner_id = ?"
     )
     .bind(id)
@@ -104,6 +112,36 @@ pub async fn get_file(pool: &DbPool, owner_id: &str, id: &str) -> AppResult<Opti
         Some(r) => Ok(Some(map_file(&r)?)),
         None => Ok(None),
     }
+}
+
+/// 返回所有文件记录，仅供存储迁移等服务端维护任务使用。
+pub async fn list_all_files_for_storage_migration(pool: &DbPool) -> AppResult<Vec<FileRow>> {
+    let rows = sqlx::query(
+        "SELECT id, owner_id, name, file_path, file_type, file_size, folder_id, description, metadata, created_at, updated_at, storage_backend, storage_key
+         FROM files ORDER BY created_at ASC",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    rows.iter().map(map_file).collect()
+}
+
+pub async fn update_storage_location(
+    pool: &DbPool,
+    id: &str,
+    backend: &str,
+    key: &str,
+) -> AppResult<()> {
+    sqlx::query(
+        "UPDATE files SET storage_backend = ?, storage_key = ?, updated_at = ? WHERE id = ?",
+    )
+    .bind(backend)
+    .bind(key)
+    .bind(chrono::Utc::now().to_rfc3339())
+    .bind(id)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 async fn get_generated_artifact_file(
@@ -122,7 +160,7 @@ async fn get_generated_artifact_file(
 
     let row = if cfg.is_mysql() {
         sqlx::query(
-            "SELECT id, owner_id, name, file_path, file_type, file_size, folder_id, description, metadata, created_at, updated_at
+            "SELECT id, owner_id, name, file_path, file_type, file_size, folder_id, description, metadata, created_at, updated_at, storage_backend, storage_key
              FROM files
              WHERE owner_id = ?
                AND JSON_EXTRACT(metadata, '$.source') = 'generated_artifact'
@@ -136,7 +174,7 @@ async fn get_generated_artifact_file(
         .await?
     } else {
         sqlx::query(
-            "SELECT id, owner_id, name, file_path, file_type, file_size, folder_id, description, metadata, created_at, updated_at
+            "SELECT id, owner_id, name, file_path, file_type, file_size, folder_id, description, metadata, created_at, updated_at, storage_backend, storage_key
              FROM files
              WHERE owner_id = ?
                AND json_extract(metadata, '$.source') = 'generated_artifact'
@@ -161,6 +199,8 @@ pub async fn create_file(
     owner_id: &str,
     name: &str,
     file_path: &str,
+    storage_backend: &str,
+    storage_key: Option<&str>,
     file_type: &str,
     file_size: i64,
     folder_id: Option<&str>,
@@ -175,13 +215,15 @@ pub async fn create_file(
     let now = chrono::Utc::now().to_rfc3339();
     let metadata_text = metadata.map(|value| value.to_string());
     sqlx::query(
-        "INSERT INTO files (id, owner_id, name, file_path, file_type, file_size, folder_id, description, metadata, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO files (id, owner_id, name, file_path, storage_backend, storage_key, file_type, file_size, folder_id, description, metadata, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     .bind(&id)
     .bind(owner_id)
     .bind(name)
     .bind(file_path)
+    .bind(storage_backend)
+    .bind(storage_key)
     .bind(file_type)
     .bind(file_size)
     .bind(folder_id)
@@ -206,6 +248,8 @@ pub async fn create_file(
             .and_then(|text| serde_json::from_str::<Value>(text).ok()),
         created_at: now.clone(),
         updated_at: now,
+        storage_backend: storage_backend.to_string(),
+        storage_key: storage_key.map(str::to_string),
     })
 }
 
@@ -223,23 +267,21 @@ pub async fn delete_file(pool: &DbPool, owner_id: &str, id: &str) -> AppResult<O
 }
 
 pub async fn stats(pool: &DbPool, owner_id: &str) -> AppResult<FileStats> {
-    let row = sqlx::query(
-        "SELECT COUNT(*), COALESCE(SUM(file_size), 0) FROM files WHERE owner_id = ?"
-    )
-    .bind(owner_id)
-    .fetch_one(pool)
-    .await?;
+    let row =
+        sqlx::query("SELECT COUNT(*), COALESCE(SUM(file_size), 0) FROM files WHERE owner_id = ?")
+            .bind(owner_id)
+            .fetch_one(pool)
+            .await?;
 
     let total_files: i64 = row.try_get(0)?;
     let total_size: i64 = row.try_get(1)?;
 
     let mut by_type = HashMap::new();
-    let rows = sqlx::query(
-        "SELECT file_type, COUNT(*) FROM files WHERE owner_id = ? GROUP BY file_type"
-    )
-    .bind(owner_id)
-    .fetch_all(pool)
-    .await?;
+    let rows =
+        sqlx::query("SELECT file_type, COUNT(*) FROM files WHERE owner_id = ? GROUP BY file_type")
+            .bind(owner_id)
+            .fetch_all(pool)
+            .await?;
 
     for row in rows {
         let file_type: String = row.try_get(0)?;
@@ -262,7 +304,7 @@ pub async fn list_folders(
     let rows = if let Some(parent_id) = parent_id {
         sqlx::query(
             "SELECT id, owner_id, name, parent_id, created_at, updated_at
-             FROM folders WHERE owner_id = ? AND parent_id = ? ORDER BY name ASC"
+             FROM folders WHERE owner_id = ? AND parent_id = ? ORDER BY name ASC",
         )
         .bind(owner_id)
         .bind(parent_id)
@@ -271,7 +313,7 @@ pub async fn list_folders(
     } else {
         sqlx::query(
             "SELECT id, owner_id, name, parent_id, created_at, updated_at
-             FROM folders WHERE owner_id = ? AND parent_id IS NULL ORDER BY name ASC"
+             FROM folders WHERE owner_id = ? AND parent_id IS NULL ORDER BY name ASC",
         )
         .bind(owner_id)
         .fetch_all(pool)
@@ -288,7 +330,7 @@ pub async fn list_folders(
 pub async fn get_folder(pool: &DbPool, owner_id: &str, id: &str) -> AppResult<Option<FolderRow>> {
     let row = sqlx::query(
         "SELECT id, owner_id, name, parent_id, created_at, updated_at
-         FROM folders WHERE id = ? AND owner_id = ?"
+         FROM folders WHERE id = ? AND owner_id = ?",
     )
     .bind(id)
     .bind(owner_id)
@@ -311,7 +353,7 @@ pub async fn create_folder(
     let now = chrono::Utc::now().to_rfc3339();
     sqlx::query(
         "INSERT INTO folders (id, owner_id, name, parent_id, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?)"
+         VALUES (?, ?, ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(owner_id)
@@ -332,7 +374,11 @@ pub async fn create_folder(
     })
 }
 
-pub async fn delete_folder_tree(pool: &DbPool, owner_id: &str, id: &str) -> AppResult<Vec<FileRow>> {
+pub async fn delete_folder_tree(
+    pool: &DbPool,
+    owner_id: &str,
+    id: &str,
+) -> AppResult<Vec<FileRow>> {
     if get_folder(pool, owner_id, id).await?.is_none() {
         return Ok(Vec::new());
     }
@@ -341,13 +387,11 @@ pub async fn delete_folder_tree(pool: &DbPool, owner_id: &str, id: &str) -> AppR
     let mut index = 0;
     while index < folder_ids.len() {
         let parent_id = folder_ids[index].clone();
-        let rows = sqlx::query(
-            "SELECT id FROM folders WHERE owner_id = ? AND parent_id = ?"
-        )
-        .bind(owner_id)
-        .bind(&parent_id)
-        .fetch_all(pool)
-        .await?;
+        let rows = sqlx::query("SELECT id FROM folders WHERE owner_id = ? AND parent_id = ?")
+            .bind(owner_id)
+            .bind(&parent_id)
+            .fetch_all(pool)
+            .await?;
 
         for row in rows {
             let child_id: String = row.try_get(0)?;
@@ -396,6 +440,8 @@ fn map_file(row: &sqlx::any::AnyRow) -> AppResult<FileRow> {
         metadata,
         created_at: row.try_get(9)?,
         updated_at: row.try_get(10)?,
+        storage_backend: row.try_get(11)?,
+        storage_key: row.try_get(12)?,
     })
 }
 

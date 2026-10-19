@@ -10,9 +10,13 @@ server/target/
 # Runtime data & outputs (anywhere in repo)
 **/data/
 **/outputs/
+/.local-data/
 
 # Environment
 .env
+.env.server
+scripts/__pycache__/
+*.pyc
 .env.production
 .env.local
 

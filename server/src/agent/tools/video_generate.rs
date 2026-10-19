@@ -23,7 +23,7 @@ struct VideoPlan {
     prompt: String,
     negative_prompt: String,
     aspect_ratio: String,
-    seconds: u8, // V2.5: 4-12 秒
+    seconds: u8,  // V2.5: 4-12 秒
     mode: String, // V2.5: text | keyframe | reference
 }
 
@@ -190,7 +190,11 @@ pub fn extract_video_urls_from_artifacts(artifacts: &[crate::models::Artifact]) 
             continue;
         }
         // 跳过分镜方案（无 video_url）
-        let art_type = artifact.content.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        let art_type = artifact
+            .content
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         if art_type == "video_storyboard" || art_type == "video_batch_summary" {
             continue;
         }
@@ -209,7 +213,10 @@ pub fn extract_video_urls_from_artifacts(artifacts: &[crate::models::Artifact]) 
 
 /// 从输入参数和产物历史中收集音频 URL
 /// 来源优先级：显式 audio_urls → 会话历史视频产物
-pub fn collect_video_audios(input: &serde_json::Value, artifacts: &[crate::models::Artifact]) -> Vec<String> {
+pub fn collect_video_audios(
+    input: &serde_json::Value,
+    artifacts: &[crate::models::Artifact],
+) -> Vec<String> {
     let mut audios = Vec::new();
 
     // 1. 显式传入的 audio_urls
@@ -225,7 +232,12 @@ pub fn collect_video_audios(input: &serde_json::Value, artifacts: &[crate::model
     }
 
     // 2. 单个 audio_url
-    if let Some(url) = input.get("audio_url").and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(url) = input
+        .get("audio_url")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         audios.push(url.to_string());
     }
 
@@ -234,7 +246,10 @@ pub fn collect_video_audios(input: &serde_json::Value, artifacts: &[crate::model
 
 /// 从输入参数和产物历史中收集视频参考 URL
 /// 来源优先级：显式 video_urls → 会话历史视频产物
-pub fn collect_video_refs(input: &serde_json::Value, artifacts: &[crate::models::Artifact]) -> Vec<VideoRef> {
+pub fn collect_video_refs(
+    input: &serde_json::Value,
+    artifacts: &[crate::models::Artifact],
+) -> Vec<VideoRef> {
     let mut refs = Vec::new();
 
     // 1. 显式传入的 video_urls（字符串数组或对象数组）
@@ -243,13 +258,25 @@ pub fn collect_video_refs(input: &serde_json::Value, artifacts: &[crate::models:
             if let Some(s) = item.as_str() {
                 let trimmed = s.trim();
                 if !trimmed.is_empty() {
-                    refs.push(VideoRef { url: trimmed.to_string(), start_seconds: None, require_audio: None });
+                    refs.push(VideoRef {
+                        url: trimmed.to_string(),
+                        start_seconds: None,
+                        require_audio: None,
+                    });
                 }
             } else if let Some(obj) = item.as_object() {
-                if let Some(url) = obj.get("url").and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty()) {
+                if let Some(url) = obj
+                    .get("url")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
                     refs.push(VideoRef {
                         url: url.to_string(),
-                        start_seconds: obj.get("start_seconds").and_then(|v| v.as_u64()).map(|n| n as f64),
+                        start_seconds: obj
+                            .get("start_seconds")
+                            .and_then(|v| v.as_u64())
+                            .map(|n| n as f64),
                         require_audio: obj.get("require_audio").and_then(|v| v.as_bool()),
                     });
                 }
@@ -258,14 +285,27 @@ pub fn collect_video_refs(input: &serde_json::Value, artifacts: &[crate::models:
     }
 
     // 2. 单个 video_url
-    if let Some(url) = input.get("video_url").and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty()) {
-        refs.push(VideoRef { url: url.to_string(), start_seconds: None, require_audio: None });
+    if let Some(url) = input
+        .get("video_url")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        refs.push(VideoRef {
+            url: url.to_string(),
+            start_seconds: None,
+            require_audio: None,
+        });
     }
 
     // 3. 从会话历史产物中提取视频 URL（用户说"基于这个视频再做一段"）
     if refs.is_empty() {
         for url in extract_video_urls_from_artifacts(artifacts) {
-            refs.push(VideoRef { url, start_seconds: None, require_audio: None });
+            refs.push(VideoRef {
+                url,
+                start_seconds: None,
+                require_audio: None,
+            });
         }
     }
 
@@ -594,12 +634,13 @@ impl OfficeTool for VideoGenerateTool {
         let requested_seconds = config_seconds
             .as_deref()
             .map(parse_seconds)
+            .or_else(|| config_duration.as_deref().map(parse_seconds))
             .or_else(|| {
-                config_duration
-                    .as_deref()
-                    .map(parse_seconds)
+                input
+                    .get("seconds")
+                    .and_then(|v| v.as_u64())
+                    .map(|n| normalize_seconds(n as u8))
             })
-            .or_else(|| input.get("seconds").and_then(|v| v.as_u64()).map(|n| normalize_seconds(n as u8)))
             .unwrap_or(5);
 
         let image_inputs = collect_video_images(ctx, &input);
@@ -656,7 +697,10 @@ impl OfficeTool for VideoGenerateTool {
 - mode 只能输出 text / keyframe / reference
 - aspect_ratio 只能输出 16:9 / 9:16 / 1:1 / 4:3 / 3:4 / 21:9"#;
 
-        let reference_guidance = if image_inputs.is_empty() && audio_inputs.is_empty() && video_refs.is_empty() {
+        let reference_guidance = if image_inputs.is_empty()
+            && audio_inputs.is_empty()
+            && video_refs.is_empty()
+        {
             "无参考素材，请按 text 模式生成完整动态画面。".to_string()
         } else {
             let mut parts = Vec::new();
@@ -686,7 +730,10 @@ impl OfficeTool for VideoGenerateTool {
                 .map(|(title, content)| format!("【{}】\n{}", title, content))
                 .collect::<Vec<_>>()
                 .join("\n\n");
-            format!("\n参考文档内容：\n{}\n请基于参考文档中的核心信息设计视频文案。", refs)
+            format!(
+                "\n参考文档内容：\n{}\n请基于参考文档中的核心信息设计视频文案。",
+                refs
+            )
         };
 
         let user_prompt = format!(
@@ -725,13 +772,23 @@ impl OfficeTool for VideoGenerateTool {
                     Ok(plan) => plan,
                     Err(err) => {
                         tracing::warn!("视频方案解析失败，使用默认方案兜底: {err}");
-                        default_video_plan(topic, requested_aspect_ratio, requested_seconds, generation_mode)
+                        default_video_plan(
+                            topic,
+                            requested_aspect_ratio,
+                            requested_seconds,
+                            generation_mode,
+                        )
                     }
                 }
             }
             Err(err) => {
                 tracing::warn!("视频方案规划失败，使用默认方案兜底: {err}");
-                default_video_plan(topic, requested_aspect_ratio, requested_seconds, generation_mode)
+                default_video_plan(
+                    topic,
+                    requested_aspect_ratio,
+                    requested_seconds,
+                    generation_mode,
+                )
             }
         };
 
@@ -753,10 +810,18 @@ impl OfficeTool for VideoGenerateTool {
             Ok(credentials) => credentials,
             Err(err) => {
                 return local_video_artifact(
-                    ctx, topic, &plan, width, height, frame_rate, num_frames,
-                    generation_mode, image_inputs.len(),
+                    ctx,
+                    topic,
+                    &plan,
+                    width,
+                    height,
+                    frame_rate,
+                    num_frames,
+                    generation_mode,
+                    image_inputs.len(),
                     format!("Agnes 凭证不可用：{err}"),
-                ).await;
+                )
+                .await;
             }
         };
         let video_model = agnes_video_model();
@@ -764,10 +829,18 @@ impl OfficeTool for VideoGenerateTool {
             Ok(client) => client,
             Err(err) => {
                 return local_video_artifact(
-                    ctx, topic, &plan, width, height, frame_rate, num_frames,
-                    generation_mode, image_inputs.len(),
+                    ctx,
+                    topic,
+                    &plan,
+                    width,
+                    height,
+                    frame_rate,
+                    num_frames,
+                    generation_mode,
+                    image_inputs.len(),
                     format!("初始化 Agnes 客户端失败：{err}"),
-                ).await;
+                )
+                .await;
             }
         };
 
@@ -832,7 +905,8 @@ impl OfficeTool for VideoGenerateTool {
                     request_body["audios"] = json!(audio_inputs);
                 }
                 if !video_refs.is_empty() {
-                    let video_arr: Vec<serde_json::Value> = video_refs.iter().map(|v| v.to_json()).collect();
+                    let video_arr: Vec<serde_json::Value> =
+                        video_refs.iter().map(|v| v.to_json()).collect();
                     request_body["videos"] = json!(video_arr);
                 }
                 // 提示词中应该已包含 <Picture N> / <Audio N> / <Video N> 占位符
@@ -843,7 +917,8 @@ impl OfficeTool for VideoGenerateTool {
                     request_body["audios"] = json!(audio_inputs);
                 }
                 if !video_refs.is_empty() {
-                    let video_arr: Vec<serde_json::Value> = video_refs.iter().map(|v| v.to_json()).collect();
+                    let video_arr: Vec<serde_json::Value> =
+                        video_refs.iter().map(|v| v.to_json()).collect();
                     request_body["videos"] = json!(video_arr);
                 }
             }
@@ -862,16 +937,27 @@ impl OfficeTool for VideoGenerateTool {
             Ok(response) => response,
             Err(err) => {
                 return local_video_artifact(
-                    ctx, topic, &plan, width, height, frame_rate, num_frames,
-                    generation_mode, image_inputs.len(),
+                    ctx,
+                    topic,
+                    &plan,
+                    width,
+                    height,
+                    frame_rate,
+                    num_frames,
+                    generation_mode,
+                    image_inputs.len(),
                     format!("Agnes V2.5 视频任务创建失败：{err}"),
-                ).await;
+                )
+                .await;
             }
         };
 
         // V2.5: 使用 id 作为查询标识
         let video_task_id = create_response.id.clone();
-        let poll_url = credentials.endpoint(&format!("/v1/videos/{}", urlencoding::encode(&video_task_id)));
+        let poll_url = credentials.endpoint(&format!(
+            "/v1/videos/{}",
+            urlencoding::encode(&video_task_id)
+        ));
         let deadline = Instant::now() + Duration::from_secs(480);
         let mut latest_progress = create_response.progress.unwrap_or(0);
 
@@ -879,28 +965,39 @@ impl OfficeTool for VideoGenerateTool {
         loop {
             if Instant::now() >= deadline {
                 return local_video_artifact(
-                    ctx, topic, &plan, width, height, frame_rate, num_frames,
-                    generation_mode, image_inputs.len(),
+                    ctx,
+                    topic,
+                    &plan,
+                    width,
+                    height,
+                    frame_rate,
+                    num_frames,
+                    generation_mode,
+                    image_inputs.len(),
                     format!("视频生成超时：任务已创建（task_id: {video_task_id}），请稍后重试"),
-                ).await;
+                )
+                .await;
             }
 
-            let status_response = match get_json::<QueryVideoResponse>(
-                &client,
-                &poll_url,
-                &credentials,
-            )
-            .await
-            {
-                Ok(response) => response,
-                Err(err) => {
-                    return local_video_artifact(
-                        ctx, topic, &plan, width, height, frame_rate, num_frames,
-                        generation_mode, image_inputs.len(),
-                        format!("获取 Agnes V2.5 视频结果失败：{err}"),
-                    ).await;
-                }
-            };
+            let status_response =
+                match get_json::<QueryVideoResponse>(&client, &poll_url, &credentials).await {
+                    Ok(response) => response,
+                    Err(err) => {
+                        return local_video_artifact(
+                            ctx,
+                            topic,
+                            &plan,
+                            width,
+                            height,
+                            frame_rate,
+                            num_frames,
+                            generation_mode,
+                            image_inputs.len(),
+                            format!("获取 Agnes V2.5 视频结果失败：{err}"),
+                        )
+                        .await;
+                    }
+                };
 
             latest_progress = status_response.progress.unwrap_or(latest_progress);
             ctx.send(
@@ -932,10 +1029,18 @@ impl OfficeTool for VideoGenerateTool {
                         Ok(url) => url,
                         Err(err) => {
                             return local_video_artifact(
-                                ctx, topic, &plan, width, height, frame_rate, num_frames,
-                                generation_mode, image_inputs.len(),
+                                ctx,
+                                topic,
+                                &plan,
+                                width,
+                                height,
+                                frame_rate,
+                                num_frames,
+                                generation_mode,
+                                image_inputs.len(),
                                 err,
-                            ).await;
+                            )
+                            .await;
                         }
                     };
                     return ToolResult::ok(
@@ -975,10 +1080,18 @@ impl OfficeTool for VideoGenerateTool {
                         .map(|value| value.to_string())
                         .unwrap_or_else(|| "未知错误".to_string());
                     return local_video_artifact(
-                        ctx, topic, &plan, width, height, frame_rate, num_frames,
-                        generation_mode, image_inputs.len(),
+                        ctx,
+                        topic,
+                        &plan,
+                        width,
+                        height,
+                        frame_rate,
+                        num_frames,
+                        generation_mode,
+                        image_inputs.len(),
                         format!("Agnes V2.5 视频生成失败：{detail}"),
-                    ).await;
+                    )
+                    .await;
                 }
                 _ => sleep(Duration::from_secs(5)).await,
             }

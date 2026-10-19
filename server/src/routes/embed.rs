@@ -30,7 +30,7 @@ pub async fn fallback_handler(uri: Uri) -> Response {
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(
             serde_json::json!({
-                "name": "WaLiOffice",
+                "name": "WaKuOffice",
                 "version": "0.2.0",
                 "message": "前端未构建。请先运行 npm run build 构建 frontend/dist/，或访问 /api/health",
                 "docs": "/api/health",

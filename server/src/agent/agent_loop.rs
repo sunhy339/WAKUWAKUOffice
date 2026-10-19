@@ -194,8 +194,7 @@ pub async fn run_agent_loop(
         };
         // 有图片附件时，LLM 可以直接结合视觉输入回答，不需要额外工具
         // 但仍保留工具定义，让 LLM 决定是否调用
-        if user_attachments.iter().any(|item| item.kind == "image")
-            && allowed_tool_names.is_none()
+        if user_attachments.iter().any(|item| item.kind == "image") && allowed_tool_names.is_none()
         {
             function_defs.clear();
         }
@@ -381,6 +380,17 @@ pub async fn run_agent_loop(
 
                 // 收集 Artifact
                 if result.success {
+                    if let Some(artifact_updates) = &result.artifact_updates {
+                        for artifact in artifact_updates {
+                            all_artifacts.retain(|item| item.id != artifact.id);
+                            all_artifacts.push(artifact.clone());
+                            let _ = tx
+                                .send(AgentEvent::Artifact {
+                                    artifact: artifact.clone(),
+                                })
+                                .await;
+                        }
+                    }
                     if let Some(artifacts) = &result.artifacts {
                         for art in artifacts {
                             let artifact = Artifact {

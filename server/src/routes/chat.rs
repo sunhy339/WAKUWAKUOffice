@@ -5,7 +5,7 @@ use base64::Engine;
 use futures::stream::Stream;
 use std::collections::HashSet;
 use std::convert::Infallible;
-use std::path::{Path as FsPath, PathBuf};
+use std::path::Path as FsPath;
 use std::time::Duration;
 use tokio_stream::wrappers::ReceiverStream;
 
@@ -16,6 +16,7 @@ use crate::error::AppError;
 use crate::models::{Artifact, ChatAttachment, ChatMessage, ChatRequest, PptProject};
 use crate::render;
 use crate::state;
+use crate::storage;
 
 pub fn router() -> Router {
     Router::new().route("/api/chat/stream", post(chat_stream))
@@ -174,13 +175,17 @@ fn build_user_message(req: &ChatRequest) -> String {
 fn allowed_tools_for_kind(tool_kind: Option<&str>) -> Option<Vec<String>> {
     match tool_kind {
         Some("image") => Some(vec!["image_prompt".to_string()]),
-        Some("video") => Some(vec!["video_generate".to_string(), "video_storyboard".to_string()]),
+        Some("video") => Some(vec![
+            "video_generate".to_string(),
+            "video_storyboard".to_string(),
+        ]),
         _ => None,
     }
 }
 
 /// 全局意图分析器（按会话隔离上下文）
-static INTENT_ANALYZER: std::sync::OnceLock<std::sync::Mutex<IntentAnalyzer>> = std::sync::OnceLock::new();
+static INTENT_ANALYZER: std::sync::OnceLock<std::sync::Mutex<IntentAnalyzer>> =
+    std::sync::OnceLock::new();
 
 fn intent_analyzer() -> &'static std::sync::Mutex<IntentAnalyzer> {
     INTENT_ANALYZER.get_or_init(|| std::sync::Mutex::new(IntentAnalyzer::new()))
@@ -233,9 +238,7 @@ fn infer_media_tool_kind(req: &ChatRequest) -> Option<String> {
         "帮我写个",
         "先构思",
     ];
-    let has_text_first_intent = text_first_patterns
-        .iter()
-        .any(|p| text.contains(p));
+    let has_text_first_intent = text_first_patterns.iter().any(|p| text.contains(p));
     if has_text_first_intent {
         return None; // 交给 LLM 自由选择工具
     }
@@ -337,12 +340,6 @@ fn merge_session_artifacts(existing: Vec<Artifact>, current_turn: Vec<Artifact>)
     merged
 }
 
-fn user_file_dir(owner_id: &str) -> PathBuf {
-    PathBuf::from(&crate::config::config().data_dir)
-        .join("files")
-        .join(owner_id)
-}
-
 fn sanitize_filename(name: &str, fallback: &str) -> String {
     let cleaned = name
         .chars()
@@ -404,31 +401,47 @@ async fn save_file_bytes(
     if data.is_empty() {
         return Ok(());
     }
-    let safe_name = sanitize_filename(name, "walioffice-file.bin");
-    let extension = FsPath::new(&safe_name)
-        .extension()
-        .and_then(|value| value.to_str())
-        .filter(|value| !value.trim().is_empty())
-        .map(|value| format!(".{value}"))
-        .unwrap_or_default();
-    let storage_name = format!("{}{}", uuid::Uuid::new_v4(), extension);
-    let storage_dir = user_file_dir(owner_id);
-    tokio::fs::create_dir_all(&storage_dir).await?;
-    let storage_path = storage_dir.join(storage_name);
-    tokio::fs::write(&storage_path, data).await?;
+    let safe_name = sanitize_filename(name, "wakuoffice-file.bin");
+    let storage_key = storage::new_key(owner_id, &safe_name);
+    let stored = storage::put(&storage_key, data, mime_type).await?;
     let file_type = infer_file_type(&safe_name, mime_type);
-    file_repo::create_file(
+    match file_repo::create_file(
         pool,
         owner_id,
         &safe_name,
-        &storage_path.to_string_lossy(),
+        stored.local_path.as_deref().unwrap_or(""),
+        &stored.backend,
+        Some(&stored.key),
         &file_type,
         data.len() as i64,
         None,
         Some(description),
         Some(metadata),
-    ).await?;
-    Ok(())
+    )
+    .await
+    {
+        Ok(file) => {
+            // 生成产物可能命中已有记录；此时本次上传的实体没有被数据库采用，及时清理避免对象存储泄漏。
+            if file.storage_key.as_deref() != Some(stored.key.as_str()) {
+                let _ = storage::delete(
+                    &stored.backend,
+                    Some(&stored.key),
+                    stored.local_path.as_deref().unwrap_or(""),
+                )
+                .await;
+            }
+            Ok(())
+        }
+        Err(error) => {
+            let _ = storage::delete(
+                &stored.backend,
+                Some(&stored.key),
+                stored.local_path.as_deref().unwrap_or(""),
+            )
+            .await;
+            Err(error.into())
+        }
+    }
 }
 
 fn decode_data_url(value: &str) -> Option<(String, Vec<u8>)> {
@@ -622,7 +635,12 @@ fn artifact_filename(artifact: &Artifact, fallback: &str, extension: &str) -> St
 }
 
 async fn save_generated_artifact_to_files(pool: &DbPool, owner_id: &str, artifact: &Artifact) {
-    tracing::info!("保存生成产物到文件: kind={}, title={}, artifact_id={}", artifact.kind, artifact.title, artifact.id);
+    tracing::info!(
+        "保存生成产物到文件: kind={}, title={}, artifact_id={}",
+        artifact.kind,
+        artifact.title,
+        artifact.id
+    );
     let description = format!("智能助手生成：{}", artifact.title);
     let metadata = serde_json::json!({
         "source": "generated_artifact",
@@ -849,7 +867,11 @@ async fn chat_stream(
     let has_image = has_image_attachment(&req);
     let intent_result = {
         let mut analyzer = intent_analyzer().lock().unwrap();
-        analyzer.analyze(&req.message, &req.session_id.clone().unwrap_or_default(), has_image)
+        analyzer.analyze(
+            &req.message,
+            &req.session_id.clone().unwrap_or_default(),
+            has_image,
+        )
     };
     tracing::info!(
         "[Intent] session={} intent={:?} confidence={:.2} source={:?} temporal={:?}",
@@ -873,14 +895,15 @@ async fn chat_stream(
         infer_media_tool_kind(&req).or_else(|| req.tool_kind.clone())
     };
 
-    let client = std::sync::Arc::new(crate::llm::LlmClient::for_user(
-        &user.0.id,
-        req.model.as_deref(),
-    ).await);
+    let client = std::sync::Arc::new(
+        crate::llm::LlmClient::for_user(&user.0.id, req.model.as_deref()).await,
+    );
 
     // 创建或获取会话
     let session = if let Some(ref sid) = req.session_id {
-        session_repo::find_by_id(&pool, sid).await?.ok_or(AppError::NotFound("会话不存在".into()))?
+        session_repo::find_by_id(&pool, sid)
+            .await?
+            .ok_or(AppError::NotFound("会话不存在".into()))?
     } else {
         let title_source = if req.message.trim().is_empty() {
             req.attachments
@@ -898,14 +921,19 @@ async fn chat_stream(
             req.project_id.as_deref(),
             resolved_tool_kind.as_deref(),
             &title,
-        ).await?
+        )
+        .await?
     };
 
     let session_id = session.id.clone();
 
     // 加载历史消息
-    let history = session_repo::get_messages(&pool, &session_id, 50).await.unwrap_or_default();
-    let existing_artifacts = session_repo::get_artifacts(&pool, &session_id).await.unwrap_or_default();
+    let history = session_repo::get_messages(&pool, &session_id, 50)
+        .await
+        .unwrap_or_default();
+    let existing_artifacts = session_repo::get_artifacts(&pool, &session_id)
+        .await
+        .unwrap_or_default();
 
     if let Some(attachments) = req.attachments.as_deref() {
         save_chat_attachments_to_files(&pool, &user.0.id, attachments).await;
@@ -933,14 +961,33 @@ async fn chat_stream(
         let analyzer = intent_analyzer().lock().unwrap();
         analyzer.build_intent_context_addition(&intent_result)
     };
-    let system_prompt = if intent_addition.is_empty() {
-        String::new() // 使用默认 OFFICE_AGENT_PROMPT
-    } else {
-        intent_addition // 仅注入意图补充，agent_loop 会拼接到 OFFICE_AGENT_PROMPT 后面
-    };
+    let target_addition = req
+        .target
+        .as_ref()
+        .filter(|target| target.operation == "edit_slide")
+        .map(|target| {
+            format!(
+                "当前是一个定向 PPT 单页编辑请求。用户已经在界面选中了 PPT 产物和第 {} 页（slide_id={}）。必须调用 ppt_edit，只修改该页，不要调用 ppt_generate 或重新生成整套 PPT。",
+                target.slide_index.map(|index| index + 1).unwrap_or(0),
+                target.slide_id.as_deref().unwrap_or("未知")
+            )
+        })
+        .unwrap_or_default();
+    let system_prompt = [intent_addition, target_addition]
+        .into_iter()
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
 
     // 用意图识别结果决定 allowed_tools
-    let allowed_tools = if intent_result.confidence >= 0.5 {
+    let allowed_tools = if req
+        .target
+        .as_ref()
+        .map(|target| target.operation == "edit_slide")
+        .unwrap_or(false)
+    {
+        Some(vec!["ppt_edit".to_string()])
+    } else if intent_result.confidence >= 0.5 {
         {
             let analyzer = intent_analyzer().lock().unwrap();
             analyzer.allowed_tools_for_intent(&intent_result)
@@ -970,6 +1017,7 @@ async fn chat_stream(
         emit,
     )
     .with_tool_config(req.tool_config.clone().unwrap_or(serde_json::json!({})))
+    .with_target(req.target.clone())
     .with_prior_artifacts(existing_artifacts.clone());
 
     let session_id_for_save = session_id.clone();
@@ -1132,7 +1180,8 @@ async fn chat_stream(
                     tool_call_id: None,
                 };
                 let _ =
-                    session_repo::add_message(&pool_for_save, &session_id_for_save, &assistant_msg).await;
+                    session_repo::add_message(&pool_for_save, &session_id_for_save, &assistant_msg)
+                        .await;
             }
         }
     });

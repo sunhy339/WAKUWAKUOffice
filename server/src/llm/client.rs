@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Result};
 use once_cell::sync::Lazy;
 use reqwest::Client;
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -71,6 +72,16 @@ fn apply_profile(
     if !profile.base_url.trim().is_empty() {
         client.base_url = profile.base_url.trim_end_matches('/').to_string();
     }
+    client.wire_api = if profile.wire_api == "responses" {
+        "responses".to_string()
+    } else {
+        "chat_completions".to_string()
+    };
+    client.reasoning_effort = if profile.reasoning_effort.trim().is_empty() {
+        "medium".to_string()
+    } else {
+        profile.reasoning_effort.trim().to_string()
+    };
 
     let keys = profile_api_keys(profile);
     client.api_keys = rotate_keys(scope, keys);
@@ -117,6 +128,8 @@ pub struct LlmClient {
     base_url: String,
     api_keys: Vec<String>,
     model: String,
+    wire_api: String,
+    reasoning_effort: String,
     timeout: Duration,
 }
 
@@ -134,9 +147,11 @@ impl LlmClient {
         };
         Self {
             http,
-            base_url: cfg.llm_base_url.trim_end_matches('/').to_string(),
+            base_url: cfg.llm_text_base_url.trim_end_matches('/').to_string(),
             api_keys,
-            model: cfg.llm_model.clone(),
+            model: cfg.llm_text_model.clone(),
+            wire_api: cfg.llm_text_wire_api.clone(),
+            reasoning_effort: cfg.llm_text_reasoning_effort.clone(),
             timeout: Duration::from_millis(cfg.llm_chat_timeout_ms),
         }
     }
@@ -274,6 +289,9 @@ impl LlmClient {
         &self,
         req: &ChatCompletionRequest,
     ) -> Result<ChatCompletionResponse> {
+        if self.wire_api == "responses" {
+            return self.send_responses_request(req).await;
+        }
         let url = format!("{}/chat/completions", self.base_url);
         debug!("LLM chat request to {url}");
 
@@ -325,6 +343,72 @@ impl LlmClient {
         Err(last_error.unwrap_or_else(|| anyhow!("当前模型服务未配置可用 API Key")))
     }
 
+    async fn send_responses_request(
+        &self,
+        req: &ChatCompletionRequest,
+    ) -> Result<ChatCompletionResponse> {
+        let url = format!("{}/responses", self.base_url);
+        let mut body = json!({
+            "model": req.model.clone(),
+            "input": responses_input(&req.messages),
+            "stream": false,
+        });
+        if let Some(tools) = req.tools.as_ref() {
+            body["tools"] = serde_json::to_value(responses_tools(tools))?;
+        }
+        if !self.reasoning_effort.is_empty() && self.reasoning_effort != "none" {
+            body["reasoning"] = json!({ "effort": self.reasoning_effort });
+        }
+
+        let keys = if self.api_keys.is_empty() {
+            vec![String::new()]
+        } else {
+            self.api_keys.clone()
+        };
+        let mut last_error: Option<anyhow::Error> = None;
+
+        for (index, api_key) in keys.iter().enumerate() {
+            let mut request = self
+                .http
+                .post(&url)
+                .header("Content-Type", "application/json")
+                .header("Accept", "application/json")
+                .timeout(self.timeout)
+                .json(&body);
+            if !api_key.is_empty() {
+                request = request.header("Authorization", format!("Bearer {api_key}"));
+            }
+
+            let response = match request.send().await {
+                Ok(response) => response,
+                Err(error) => {
+                    last_error = Some(error.into());
+                    if index + 1 < keys.len() {
+                        continue;
+                    }
+                    break;
+                }
+            };
+
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            if !status.is_success() {
+                let error = anyhow!("Responses API 返回错误 {status}: {text}");
+                if should_retry_with_next_key(status) && index + 1 < keys.len() {
+                    last_error = Some(error);
+                    continue;
+                }
+                return Err(error);
+            }
+
+            let value: Value = serde_json::from_str(&text)
+                .map_err(|error| anyhow!("Responses API 返回 JSON 无法解析: {error}"))?;
+            return responses_to_chat_response(value, &self.model);
+        }
+
+        Err(last_error.unwrap_or_else(|| anyhow!("当前模型服务未配置可用 API Key")))
+    }
+
     /// 提取 JSON（容错：去 markdown fence、截取首尾花括号）
     pub fn extract_json(text: &str) -> Result<serde_json::Value> {
         let cleaned = text
@@ -356,6 +440,152 @@ impl LlmClient {
         }
         Err(anyhow!("模型未返回可解析 JSON"))
     }
+}
+
+fn responses_input(messages: &[RequestMessage]) -> Vec<Value> {
+    let mut input = Vec::new();
+    for message in messages {
+        if message.role == "tool" {
+            if let Some(call_id) = message.tool_call_id.as_deref() {
+                input.push(json!({
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": message.content.clone(),
+                }));
+            }
+            continue;
+        }
+
+        let content_text = message
+            .content
+            .as_str()
+            .map(str::to_string)
+            .unwrap_or_else(|| message.content.to_string());
+        if !content_text.is_empty() {
+            let content_type = if message.role == "assistant" {
+                "output_text"
+            } else {
+                "input_text"
+            };
+            input.push(json!({
+                "role": message.role,
+                "content": [{"type": content_type, "text": content_text}],
+            }));
+        }
+
+        if let Some(tool_calls) = &message.tool_calls {
+            for call in tool_calls {
+                let function = call.get("function").cloned().unwrap_or_default();
+                let call_id = call.get("id").and_then(Value::as_str).unwrap_or_default();
+                let name = function
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let arguments = function
+                    .get("arguments")
+                    .and_then(Value::as_str)
+                    .unwrap_or("{}");
+                input.push(json!({
+                    "type": "function_call",
+                    "call_id": call_id,
+                    "name": name,
+                    "arguments": arguments,
+                }));
+            }
+        }
+    }
+    input
+}
+
+fn responses_tools(tools: &[FunctionDef]) -> Vec<Value> {
+    tools
+        .iter()
+        .map(|tool| {
+            json!({
+                "type": "function",
+                "name": tool.function.name,
+                "description": tool.function.description,
+                "parameters": tool.function.parameters,
+            })
+        })
+        .collect()
+}
+
+fn responses_to_chat_response(
+    value: Value,
+    fallback_model: &str,
+) -> Result<ChatCompletionResponse> {
+    let mut content = String::new();
+    let mut tool_calls = Vec::new();
+    if let Some(output) = value.get("output").and_then(Value::as_array) {
+        for item in output {
+            match item.get("type").and_then(Value::as_str).unwrap_or_default() {
+                "message" => {
+                    if let Some(parts) = item.get("content").and_then(Value::as_array) {
+                        for part in parts {
+                            if let Some(text) = part.get("text").and_then(Value::as_str) {
+                                content.push_str(text);
+                            }
+                        }
+                    }
+                }
+                "function_call" => {
+                    let call_id = item
+                        .get("call_id")
+                        .or_else(|| item.get("id"))
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    let name = item
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    let arguments = item
+                        .get("arguments")
+                        .and_then(Value::as_str)
+                        .unwrap_or("{}")
+                        .to_string();
+                    tool_calls.push(ToolCall {
+                        id: call_id,
+                        call_type: "function".into(),
+                        function: ToolFunction { name, arguments },
+                    });
+                }
+                _ => {}
+            }
+        }
+    }
+    if content.is_empty() {
+        content = value
+            .get("output_text")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+    }
+    Ok(ChatCompletionResponse {
+        choices: vec![Choice {
+            message: ResponseMessage {
+                role: "assistant".into(),
+                content: if content.is_empty() {
+                    None
+                } else {
+                    Some(content)
+                },
+                tool_calls: if tool_calls.is_empty() {
+                    None
+                } else {
+                    Some(tool_calls)
+                },
+            },
+            finish_reason: Some("stop".into()),
+        }],
+        model: value
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or(fallback_model)
+            .to_string(),
+    })
 }
 
 fn build_request_messages(
@@ -397,5 +627,10 @@ fn has_image_attachments(user_attachments: Option<&[ChatAttachment]>) -> bool {
 
 fn is_chat_compatible_model(model: &str) -> bool {
     let normalized = model.trim().to_lowercase();
-    !(normalized.starts_with("agnes-image-") || normalized.starts_with("agnes-video-"))
+    !(normalized.starts_with("agnes-image-")
+        || normalized.starts_with("agnes-video-")
+        || normalized.starts_with("gpt-image-")
+        || normalized.starts_with("gpt-video-")
+        || normalized.starts_with("image-")
+        || normalized.starts_with("video-"))
 }

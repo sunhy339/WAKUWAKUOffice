@@ -1,8 +1,8 @@
-# WaLiOffice
+# WaKuOffice
 
 > Web 端 AI Agent 智能办公平台 — 通过自然语言对话，一键生成 PPT、文档、表格、流程图、图表、图片和视频。
 
-WaLiOffice 将 AI Agent 能力与办公文档生成深度结合：用户在对话中描述需求，Agent 自动拆解任务、调用工具、生成产物，全程 SSE 流式响应，实时展示思考和生成过程。生产部署只需一个 Rust 二进制（前端静态资源内嵌），开箱即用。
+WaKuOffice 将 AI Agent 能力与办公文档生成深度结合：用户在对话中描述需求，Agent 自动拆解任务、调用工具、生成产物，全程 SSE 流式响应，实时展示思考和生成过程。生产部署只需一个 Rust 二进制（前端静态资源内嵌），开箱即用。
 
 你也可以选择安装 Deepseek Harness Plugin [https://github.com/fuzhengwei/walioffice-dsh-plugin](https://github.com/fuzhengwei/walioffice-dsh-plugin)
 
@@ -19,7 +19,7 @@ WaLiOffice 将 AI Agent 能力与办公文档生成深度结合：用户在对�
 - **联网搜索**：支持 SearXNG / DuckDuckGo 多搜索源，Agent 可主动检索实时信息
 - **文件解析**：支持上传文件内容提取与 OCR 识别，作为对话上下文
 - **多模型切换**：文本 / 图片 / 视频各自独立配置模型列表，前端设置页可实时切换
-- **用户认证**：JWT 认证 + 公众号验证码登录，支持注册和登录验证码
+- **用户认证**：JWT 认证，支持账号密码注册和登录
 - **单一二进制部署**：Rust + rust-embed，前端嵌入后端，一个二进制即可启动全部服务
 - **Docker 一键部署**：多阶段构建，内置国内镜像加速
 
@@ -70,7 +70,7 @@ WaLiOffice 将 AI Agent 能力与办公文档生成深度结合：用户在对�
 ## 📁 项目结构
 
 ```
-WaLiOffice/
+WaKuOffice/
 ├── server/                   # Rust 服务端（~14000 行）
 │   └── src/
 │       ├── main.rs           # 启动入口
@@ -192,7 +192,13 @@ npm run build
 # 访问 http://localhost:8000
 ```
 
-### 4. Docker 部署
+### 4. Windows 本地单人包
+
+生产构建会把 React 前端嵌入 Rust 二进制。将 `walioffice.exe`、`.env`、`scripts/start-local.bat` 和 `scripts/start-local.ps1` 放在同一发布目录后，双击 `start-local.bat` 即可启动本地服务并自动打开浏览器。
+
+本地单人模式使用 SQLite，不显示注册登录页面；数据默认保存在发布目录的 `data/`。详细说明见 [docs/local-use.md](docs/local-use.md)。
+
+### 5. Docker 部署
 
 ```bash
 # 使用预构建镜像
@@ -274,13 +280,22 @@ Dockerfile 采用三阶段构建：
 | `AIPPT_WEB_SEARCH_PROVIDER` | ❌ | `auto` | 搜索源：`auto` / `searxng` / `duckduckgo` |
 | `AIPPT_CORS_ORIGINS` | ❌ | — | CORS 允许来源（逗号分隔） |
 | `AIPPT_DATA_DIR` | ❌ | `data` | 数据存储目录 |
+| `STORAGE_BACKEND` | ❌ | `local` | 文件实体存储：`local` 或 S3 兼容服务 |
+| `STORAGE_S3_ENDPOINT` | 使用 `s3` 时必填 | — | MinIO / S3 / R2 服务地址 |
+| `STORAGE_S3_BUCKET` | 使用 `s3` 时必填 | `wakuoffice` | 对象存储桶名称 |
+| `STORAGE_S3_ACCESS_KEY` | 使用 `s3` 时必填 | — | 服务端访问密钥，不返回前端 |
+| `STORAGE_S3_SECRET_KEY` | 使用 `s3` 时必填 | — | 服务端私密密钥，不提交 Git |
+| `STORAGE_S3_REGION` | ❌ | `us-east-1` | S3 区域标识 |
+| `STORAGE_S3_PATH_STYLE` | ❌ | `true` | MinIO 通常保持 `true` |
 
 > 完整配置见 [`.env.example`](.env.example)。
 
+在线模式建议使用私有 MinIO/S3 桶：数据库只保存文件元数据和对象键，文件实体由对象存储保存；Redis 适合做限流、短期缓存和任务状态，不作为文件唯一存储。配置示例见 [本地使用说明](docs/local-use.md)。
+
 ## 📌 登录说明
 
-- 支持**账号密码注册 / 登录**和**公众号验证码登录**两种方式
-- 验证码登录需配置 `WALIOFFICE_X_API_AUTH_LOGIN_URL` 指向验证服务
+- 前端默认提供**账号密码注册 / 登录**，登录页不再展示公众号扫码入口
+- 后端优先使用 `WAKUOFFICE_X_API_AUTH_LOGIN_URL`，同时保留 `WALIOFFICE_X_API_AUTH_LOGIN_URL` 配置，用于兼容已有调用方
 - 管理后台已暂时移除，启动时不再创建默认管理员账号
 
 ## 📄 相关文档

@@ -2,7 +2,7 @@
 set -e
 
 # ============================================================
-# WaLiOffice Docker 镜像构建 + 推送
+# WaKuOffice Docker 镜像构建 + 推送
 # 用法: ./build.sh
 # 前提: Docker Desktop 已启动，已登录阿里云镜像仓库
 # ============================================================
@@ -14,7 +14,7 @@ IMAGE_NAME="walioffice"
 IMAGE_TAG="1.0"
 FULL_IMAGE="${ALIYUN_REGISTRY}/${NAMESPACE}/${IMAGE_NAME}:${IMAGE_TAG}"
 
-echo "🔧 开始构建 WaLiOffice Docker 镜像..."
+echo "🔧 开始构建 WaKuOffice Docker 镜像..."
 echo "   镜像地址: ${FULL_IMAGE}"
 echo "   支持平台: linux/amd64, linux/arm64"
 echo ""

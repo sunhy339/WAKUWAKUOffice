@@ -7,6 +7,8 @@ pub struct User {
     pub email: Option<String>,
     pub avatar: Option<String>,
     pub role: String,
+    #[serde(skip)]
+    pub auth_version: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -16,11 +18,25 @@ pub struct TokenResponse {
     pub user: User,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct AuthModeResponse {
+    pub mode: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmProfileConfig {
     pub id: String,
     pub name: String,
     pub base_url: String,
+    /// 模型服务提供商标识，例如 OpenAI；用于展示和后续协议扩展。
+    #[serde(default)]
+    pub provider: String,
+    /// 线协议：chat_completions 或 responses。
+    #[serde(default)]
+    pub wire_api: String,
+    /// Responses API 的推理强度；Chat Completions 服务会忽略该字段。
+    #[serde(default)]
+    pub reasoning_effort: String,
     #[serde(default)]
     pub api_keys: Vec<String>,
     pub models: Vec<String>,
@@ -95,6 +111,24 @@ pub struct RegisterRequest {
     pub email: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct PasswordResetRequest {
+    pub email: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PasswordResetConfirmRequest {
+    pub token: String,
+    pub password: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PasswordResetResponse {
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reset_url: Option<String>,
+}
+
 // ── Chat ──
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -135,6 +169,25 @@ pub struct ChatRequest {
     pub attachments: Option<Vec<ChatAttachment>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_config: Option<serde_json::Value>,
+    /// 当前请求针对的结构化目标。普通聊天不提供此字段；PPT 单页编辑等定向操作使用它避免依赖自然语言猜测。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<ChatTargetContext>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatTargetContext {
+    /// 当前定向操作，例如 `edit_slide`。
+    pub operation: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slide_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slide_index: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_version: Option<i32>,
 }
 
 // ── Slide / PPT ──

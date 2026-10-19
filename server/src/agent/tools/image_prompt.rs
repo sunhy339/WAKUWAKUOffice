@@ -8,7 +8,9 @@ use crate::agent::tool::{OfficeTool, ToolArtifact, ToolContext, ToolResult};
 use crate::llm::LlmClient;
 use crate::models::{ChatAttachment, ChatMessage};
 
-use super::agnes_media::{agnes_image_model, http_client, post_json_url, resolve_image_credentials, AgnesCredentials};
+use super::agnes_media::{
+    agnes_image_model, http_client, post_json_url, resolve_image_credentials, AgnesCredentials,
+};
 
 pub struct ImagePromptTool;
 
@@ -395,9 +397,7 @@ impl OfficeTool for ImagePromptTool {
             };
 
             let response =
-                match generate_agnes_image(&client, &endpoint, &credentials, &request_body)
-                    .await
-                {
+                match generate_agnes_image(&client, &endpoint, &credentials, &request_body).await {
                     Ok(response) => response,
                     Err(err) => {
                         let detail = format!(
@@ -473,9 +473,7 @@ impl OfficeTool for ImagePromptTool {
                     }
                 })
             };
-            match generate_agnes_image(&client, &endpoint, &credentials, &fallback_body)
-                .await
-            {
+            match generate_agnes_image(&client, &endpoint, &credentials, &fallback_body).await {
                 Ok(response) => {
                     if let Some(image) = response.data.into_iter().next() {
                         if let Some(src) = image_src_from_response(&image) {

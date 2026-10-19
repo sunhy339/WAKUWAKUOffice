@@ -9,6 +9,10 @@ RUN npm run build
 # ── Stage 2: 构建后端 ──
 FROM rust:1.88-bookworm AS server
 WORKDIR /srv
+# rust-s3/reqwest currently fails during GNU ld linking with the full-LTO
+# release profile on this Linux toolchain (encoding_rs symbols are omitted).
+# Keep release optimizations, but disable LTO for the portable server image.
+ENV CARGO_PROFILE_RELEASE_LTO=off
 # 使用国内 crates.io 镜像加速
 RUN mkdir -p /usr/local/cargo && \
     echo '[source.crates-io]' > /usr/local/cargo/config.toml && \
@@ -23,7 +27,7 @@ COPY server/src ./src
 COPY migrations ../migrations
 # 复制前端构建产物（rust-embed 在编译时读取）
 COPY --from=frontend /fe/dist ../frontend/dist
-RUN touch src/main.rs && cargo build --release
+RUN touch src/main.rs && CARGO_PROFILE_RELEASE_LTO=off cargo build --release
 
 # ── Stage 3: 运行时 ──
 # 不换 apt 源，不改 sources.list，避免国内镜像源超时

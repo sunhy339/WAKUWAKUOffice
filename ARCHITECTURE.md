@@ -1,8 +1,8 @@
-# WaLiOffice Architecture
+# WaKuOffice Architecture
 
 ## 目标
 
-WaLiOffice 采用“Rust 服务端 + React 前端嵌入”的标准 Web Agent 架构。生产部署时只需要运行一个 Rust 二进制，即可提供 Web UI、认证、Agent 对话、工具编排、SQLite 持久化和文档导出能力。
+WaKuOffice 采用“Rust 服务端 + React 前端嵌入”的标准 Web Agent 架构。生产部署时只需要运行一个 Rust 二进制，即可提供 Web UI、认证、Agent 对话、工具编排、SQLite 持久化和文档导出能力。
 
 ## 技术分层
 

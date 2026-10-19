@@ -40,17 +40,33 @@ async fn list_sessions(
     Query(query): Query<SessionListQuery>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let pool = state::db_pool();
-    tracing::info!("[Sessions] list_sessions called: user_id={}, username={}, query={:?}", user.0.id, user.0.username, query.q);
+    tracing::info!(
+        "[Sessions] list_sessions called: user_id={}, username={}, query={:?}",
+        user.0.id,
+        user.0.username,
+        query.q
+    );
     let sessions = session_repo::list_by_owner(&pool, &user.0.id, 50, query.q.as_deref()).await?;
-    tracing::info!("[Sessions] list_sessions: user={}, count={}", user.0.id, sessions.len());
+    tracing::info!(
+        "[Sessions] list_sessions: user={}, count={}",
+        user.0.id,
+        sessions.len()
+    );
     if let Some(first) = sessions.first() {
-        tracing::info!("[Sessions] first session: id={}, title={}", first.id, first.title);
+        tracing::info!(
+            "[Sessions] first session: id={}, title={}",
+            first.id,
+            first.title
+        );
     }
     let json_val = serde_json::to_value(&sessions).map_err(|e| {
         tracing::error!("[Sessions] serialize error: {:?}", e);
         AppError::Internal(anyhow::anyhow!("serialize error: {}", e))
     })?;
-    tracing::info!("[Sessions] serialized OK, len={}", json_val.as_array().map(|a| a.len()).unwrap_or(0));
+    tracing::info!(
+        "[Sessions] serialized OK, len={}",
+        json_val.as_array().map(|a| a.len()).unwrap_or(0)
+    );
     Ok(Json(json!({ "sessions": json_val })))
 }
 
@@ -59,7 +75,11 @@ async fn get_session(
     Path(session_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let pool = state::db_pool();
-    tracing::info!("[Session] get_session called: session_id={}, user={}", session_id, user.0.id);
+    tracing::info!(
+        "[Session] get_session called: session_id={}, user={}",
+        session_id,
+        user.0.id
+    );
     let session = session_repo::get_session_detail(&pool, &session_id)
         .await
         .map_err(|e| {
@@ -126,7 +146,8 @@ async fn update_session(
             &user.0.id,
             project_id_owned.as_deref(),
             order_col,
-        ).await?;
+        )
+        .await?;
     }
 
     Ok(Json(json!({ "updated": updated })))

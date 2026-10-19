@@ -325,14 +325,12 @@ impl OfficeTool for VideoStoryboardTool {
                     .and_then(|c| c.message.content.as_deref())
                     .unwrap_or("");
                 match LlmClient::extract_json(content) {
-                    Ok(value) => {
-                        match serde_json::from_value::<StoryboardPlan>(value) {
-                            Ok(plan) => plan,
-                            Err(err) => {
-                                return ToolResult::err(format!("分镜方案解析失败: {err}"));
-                            }
+                    Ok(value) => match serde_json::from_value::<StoryboardPlan>(value) {
+                        Ok(plan) => plan,
+                        Err(err) => {
+                            return ToolResult::err(format!("分镜方案解析失败: {err}"));
                         }
-                    }
+                    },
                     Err(err) => {
                         return ToolResult::err(format!("分镜方案 JSON 提取失败: {err}"));
                     }

@@ -36,6 +36,9 @@ export interface LLMProfile {
   id: string;
   name: string;
   base_url: string;
+  provider?: string;
+  wire_api?: 'chat_completions' | 'responses' | string;
+  reasoning_effort?: 'none' | 'low' | 'medium' | 'high' | string;
   api_keys?: string[];
   models: string[];
   default_model: string;
@@ -218,6 +221,16 @@ export interface ChatMessage {
   inputRefs?: InputRef[];
 }
 
+/** 当前请求针对的结构化目标，普通聊天请求不提供。 */
+export interface ChatTargetContext {
+  operation: 'edit_slide' | string;
+  kind?: ArtifactKind | ToolKind | string;
+  artifact_id?: string;
+  slide_id?: string;
+  slide_index?: number;
+  expected_version?: number;
+}
+
 // ===== 用户 =====
 export interface User {
   id: string;
@@ -286,6 +299,8 @@ export interface ChatArtifactUpdateEventData {
   artifacts?: Artifact[];
   session_id?: string;
   tool_kind?: ToolKind;
+  edited_slide_id?: string;
+  operation?: string;
 }
 
 export interface ChatProjectUpdateEventData {

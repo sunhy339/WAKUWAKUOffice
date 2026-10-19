@@ -9,6 +9,12 @@ pub struct Config {
 
     pub jwt_secret: String,
     pub jwt_expiry_hours: i64,
+    pub auth_mode: String,
+    pub auth_local_username: String,
+    pub auth_reset_token_ttl_minutes: i64,
+    pub auth_reset_base_url: String,
+    pub auth_reset_dev_mode: bool,
+    pub auth_reset_webhook_url: Option<String>,
     pub x_api_auth_login_url: String,
 
     pub llm_base_url: String,
@@ -20,6 +26,9 @@ pub struct Config {
     pub llm_text_api_keys: Vec<String>,
     pub llm_text_model: String,
     pub llm_text_models: Vec<String>,
+    pub llm_text_provider: String,
+    pub llm_text_wire_api: String,
+    pub llm_text_reasoning_effort: String,
     pub llm_image_base_url: String,
     pub llm_image_api_key: String,
     pub llm_image_api_keys: Vec<String>,
@@ -41,6 +50,15 @@ pub struct Config {
     pub projects_dir: String,
     pub sessions_dir: String,
     pub render_output_dir: String,
+
+    // 文件存储配置：local 使用 data/files，s3 使用 S3 兼容对象存储。
+    pub storage_backend: String,
+    pub storage_s3_endpoint: String,
+    pub storage_s3_region: String,
+    pub storage_s3_bucket: String,
+    pub storage_s3_access_key: String,
+    pub storage_s3_secret_key: String,
+    pub storage_s3_path_style: bool,
 
     pub cors_origins: Vec<String>,
 
@@ -81,6 +99,12 @@ impl Config {
                 d
             }
         };
+        let llm_text_provider = env_or("LLM_TEXT_PROVIDER", "OpenAI Compatible");
+        let llm_text_wire_api = match env_or("LLM_TEXT_WIRE_API", "chat_completions").as_str() {
+            "responses" => "responses".to_string(),
+            _ => "chat_completions".to_string(),
+        };
+        let llm_text_reasoning_effort = env_or("LLM_TEXT_REASONING_EFFORT", "medium");
 
         let llm_image_models = match env::var("LLM_IMAGE_MODELS") {
             Ok(v) if !v.trim().is_empty() => split_env_list(&v),
@@ -114,19 +138,46 @@ impl Config {
 
         // 数据库配置：如果不配 DATABASE_URL，默认使用 SQLite
         let data_dir = env_or("AIPPT_DATA_DIR", "data");
-        let database_url = env_or("DATABASE_URL", &format!("sqlite://{}/walioffice.db?mode=rwc", data_dir));
+        let database_url = env::var("DATABASE_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| sqlite_database_url(&data_dir));
+
+        let x_api_auth_login_url = env::var("WAKUOFFICE_X_API_AUTH_LOGIN_URL")
+            .or_else(|_| env::var("WALIOFFICE_X_API_AUTH_LOGIN_URL"))
+            .unwrap_or_else(|_| "https://x-api.itedus.cn/api/v1/auth/login".to_string());
+        let configured_app_name = env_or("AIPPT_APP_NAME", "WaKuOffice");
+        let app_name = if configured_app_name.eq_ignore_ascii_case("walioffice") {
+            "WaKuOffice".to_string()
+        } else {
+            configured_app_name
+        };
 
         Ok(Self {
-            app_name: env_or("AIPPT_APP_NAME", "WaLiOffice"),
+            app_name,
             host: env_or("AIPPT_HOST", "0.0.0.0"),
             port: env_or("AIPPT_PORT", "8000").parse().unwrap_or(8000),
 
             jwt_secret,
             jwt_expiry_hours: env_or("AIPPT_JWT_EXPIRY_HOURS", "24").parse().unwrap_or(24),
-            x_api_auth_login_url: env_or(
-                "WALIOFFICE_X_API_AUTH_LOGIN_URL",
-                "https://x-api.itedus.cn/api/v1/auth/login",
+            auth_mode: env_or("AIPPT_AUTH_MODE", "account"),
+            auth_local_username: env_or("AIPPT_AUTH_LOCAL_USERNAME", "local-user"),
+            auth_reset_token_ttl_minutes: env_or("AIPPT_AUTH_RESET_TOKEN_TTL_MINUTES", "20")
+                .parse()
+                .unwrap_or(20)
+                .clamp(5, 120),
+            auth_reset_base_url: env_or(
+                "AIPPT_AUTH_RESET_BASE_URL",
+                "http://localhost:5173/reset-password",
             ),
+            auth_reset_dev_mode: env::var("AIPPT_AUTH_RESET_DEV_MODE")
+                .ok()
+                .and_then(|value| value.parse::<bool>().ok())
+                .unwrap_or(cfg!(debug_assertions)),
+            auth_reset_webhook_url: env::var("AIPPT_AUTH_RESET_WEBHOOK_URL")
+                .ok()
+                .filter(|value| !value.trim().is_empty()),
+            x_api_auth_login_url,
 
             llm_base_url: llm_text_base_url.clone(),
             llm_api_key,
@@ -137,6 +188,9 @@ impl Config {
             llm_text_api_keys,
             llm_text_model,
             llm_text_models,
+            llm_text_provider,
+            llm_text_wire_api,
+            llm_text_reasoning_effort,
             llm_image_base_url,
             llm_image_api_key,
             llm_image_api_keys,
@@ -165,6 +219,16 @@ impl Config {
             sessions_dir: env_or("AIPPT_SESSIONS_DIR", "data/sessions"),
             render_output_dir: env_or("AIPPT_RENDER_OUTPUT_DIR", "outputs"),
 
+            storage_backend: env_or("STORAGE_BACKEND", "local").to_lowercase(),
+            storage_s3_endpoint: env_or("STORAGE_S3_ENDPOINT", ""),
+            storage_s3_region: env_or("STORAGE_S3_REGION", "us-east-1"),
+            storage_s3_bucket: env_or("STORAGE_S3_BUCKET", "wakuoffice"),
+            storage_s3_access_key: env_or("STORAGE_S3_ACCESS_KEY", ""),
+            storage_s3_secret_key: env_or("STORAGE_S3_SECRET_KEY", ""),
+            storage_s3_path_style: env_or("STORAGE_S3_PATH_STYLE", "true")
+                .parse()
+                .unwrap_or(true),
+
             cors_origins: env_or("AIPPT_CORS_ORIGINS", "http://localhost:5173")
                 .split(',')
                 .map(|s| s.trim().to_string())
@@ -192,6 +256,10 @@ impl Config {
     pub fn is_mysql(&self) -> bool {
         self.database_url.starts_with("mysql://")
     }
+
+    pub fn is_local_auth(&self) -> bool {
+        self.auth_mode.eq_ignore_ascii_case("local")
+    }
 }
 
 fn env_or(key: &str, default: &str) -> String {
@@ -212,6 +280,44 @@ fn split_env_list(value: &str) -> Vec<String> {
         .map(|item| item.trim().to_string())
         .filter(|item| !item.is_empty())
         .collect()
+}
+
+fn sqlite_database_url(data_dir: &str) -> String {
+    // SQLx parses the SQLite URL as a path after `sqlite://`. Normalize Windows
+    // separators so an absolute `C:\\...` data directory also works.
+    let normalized = data_dir.replace('\\', "/");
+    let prefix = if normalized.starts_with('/')
+        || normalized.len() > 1 && normalized.as_bytes()[1] == b':'
+    {
+        "sqlite:///"
+    } else {
+        "sqlite://"
+    };
+    format!(
+        "{prefix}{}/walioffice.db?mode=rwc",
+        normalized.trim_end_matches('/')
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sqlite_database_url;
+
+    #[test]
+    fn sqlite_url_uses_forward_slashes_for_windows_paths() {
+        assert_eq!(
+            sqlite_database_url(r"C:\Users\demo\data"),
+            "sqlite:///C:/Users/demo/data/walioffice.db?mode=rwc"
+        );
+    }
+
+    #[test]
+    fn sqlite_url_keeps_relative_paths_relative() {
+        assert_eq!(
+            sqlite_database_url("data"),
+            "sqlite://data/walioffice.db?mode=rwc"
+        );
+    }
 }
 
 fn env_or_required(key: &str) -> String {

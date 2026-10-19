@@ -2,7 +2,7 @@
   "name": "walioffice",
   "private": true,
   "version": "0.2.0",
-  "description": "WaLiOffice Web AI Agent - Rust server with embedded React frontend",
+  "description": "WaKuOffice Web AI Agent - Rust server with embedded React frontend",
   "type": "module",
   "scripts": {
     "dev": "concurrently -k -n server,web \"npm:dev:server\" \"npm:dev:web\"",

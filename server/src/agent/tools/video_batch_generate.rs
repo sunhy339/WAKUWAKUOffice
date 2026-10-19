@@ -6,7 +6,7 @@ use tokio::time::sleep;
 
 use crate::agent::tool::{OfficeTool, ToolArtifact, ToolContext, ToolResult};
 
-use super::video_generate::{normalize_aspect_ratio, collect_video_audios, collect_video_refs};
+use super::video_generate::{collect_video_audios, collect_video_refs, normalize_aspect_ratio};
 use crate::agent::tools::agnes_media::{
     agnes_video_model, get_json, http_client, post_json, resolve_video_credentials,
 };
@@ -151,12 +151,13 @@ impl OfficeTool for VideoBatchGenerateTool {
         }
 
         // ---- 解析分镜内容 ----
-        let storyboard: StoryboardContent = match serde_json::from_value(storyboard_artifact.content.clone()) {
-            Ok(s) => s,
-            Err(err) => {
-                return ToolResult::err(format!("分镜方案解析失败: {err}"));
-            }
-        };
+        let storyboard: StoryboardContent =
+            match serde_json::from_value(storyboard_artifact.content.clone()) {
+                Ok(s) => s,
+                Err(err) => {
+                    return ToolResult::err(format!("分镜方案解析失败: {err}"));
+                }
+            };
 
         let total_shots = storyboard.shots.len();
         if total_shots == 0 {
@@ -259,7 +260,8 @@ impl OfficeTool for VideoBatchGenerateTool {
                             // 在 prompt 中添加 <Video 1> 引用
                             if !shot.prompt.contains("<Video") {
                                 let video_ref = " Based on <Video 1> for visual continuity, maintain consistent character and scene style.";
-                                request_body["prompt"] = json!(format!("{}{}", shot.prompt, video_ref));
+                                request_body["prompt"] =
+                                    json!(format!("{}{}", shot.prompt, video_ref));
                             }
                         }
                         if !refs.is_empty() {
@@ -292,7 +294,8 @@ impl OfficeTool for VideoBatchGenerateTool {
                             }]);
                             if !shot.prompt.contains("<Video") {
                                 let video_ref = " Based on <Video 1> for visual continuity, maintain consistent character and scene style.";
-                                request_body["prompt"] = json!(format!("{}{}", shot.prompt, video_ref));
+                                request_body["prompt"] =
+                                    json!(format!("{}{}", shot.prompt, video_ref));
                             }
                         }
                     }
@@ -301,35 +304,37 @@ impl OfficeTool for VideoBatchGenerateTool {
 
             // ---- 提交任务 ----
             let create_url = credentials.endpoint("/v1/videos");
-            let create_resp: CreateVideoResponse = match post_json(&client, &create_url, &credentials, &request_body).await {
-                Ok(r) => r,
-                Err(err) => {
-                    // 单镜头失败不影响其他镜头
-                    ctx.send("state_update", json!({
+            let create_resp: CreateVideoResponse =
+                match post_json(&client, &create_url, &credentials, &request_body).await {
+                    Ok(r) => r,
+                    Err(err) => {
+                        // 单镜头失败不影响其他镜头
+                        ctx.send("state_update", json!({
                         "phase": "running",
                         "step": format!("镜头 {shot_num} 提交失败"),
                         "detail": format!("镜头 {shot_num}《{}》提交失败：{err}，跳过", shot.title),
                         "at": chrono::Utc::now().to_rfc3339(),
                     }));
-                    video_artifacts.push(ToolArtifact {
-                        kind: "video".into(),
-                        title: format!("镜头{}：{}（失败）", shot.index, shot.title),
-                        content: json!({
-                            "type": "generated_video",
-                            "title": format!("镜头{}：{}", shot.index, shot.title),
-                            "description": shot.description,
-                            "prompt": shot.prompt,
-                            "status": "failed",
-                            "error": format!("提交失败：{err}"),
-                            "shot_index": shot.index,
-                        }),
-                    });
-                    continue;
-                }
-            };
+                        video_artifacts.push(ToolArtifact {
+                            kind: "video".into(),
+                            title: format!("镜头{}：{}（失败）", shot.index, shot.title),
+                            content: json!({
+                                "type": "generated_video",
+                                "title": format!("镜头{}：{}", shot.index, shot.title),
+                                "description": shot.description,
+                                "prompt": shot.prompt,
+                                "status": "failed",
+                                "error": format!("提交失败：{err}"),
+                                "shot_index": shot.index,
+                            }),
+                        });
+                        continue;
+                    }
+                };
 
             let task_id = create_resp.id.clone();
-            let poll_url = credentials.endpoint(&format!("/v1/videos/{}", urlencoding::encode(&task_id)));
+            let poll_url =
+                credentials.endpoint(&format!("/v1/videos/{}", urlencoding::encode(&task_id)));
             let deadline = Instant::now() + Duration::from_secs(480);
             let mut latest_progress = create_resp.progress.unwrap_or(0);
 
@@ -343,13 +348,14 @@ impl OfficeTool for VideoBatchGenerateTool {
                     break;
                 }
 
-                let status_resp: QueryVideoResponse = match get_json(&client, &poll_url, &credentials).await {
-                    Ok(r) => r,
-                    Err(_) => {
-                        sleep(Duration::from_secs(5)).await;
-                        continue;
-                    }
-                };
+                let status_resp: QueryVideoResponse =
+                    match get_json(&client, &poll_url, &credentials).await {
+                        Ok(r) => r,
+                        Err(_) => {
+                            sleep(Duration::from_secs(5)).await;
+                            continue;
+                        }
+                    };
 
                 latest_progress = status_resp.progress.unwrap_or(latest_progress);
                 ctx.send("state_update", json!({
@@ -449,7 +455,10 @@ impl OfficeTool for VideoBatchGenerateTool {
         } else {
             format!(
                 "《{}》批量生成完成：共 {} 个镜头，成功 {} 个，失败 {} 个。成功的镜头可下载使用。",
-                storyboard.title, total_shots, success_count, total_shots - success_count
+                storyboard.title,
+                total_shots,
+                success_count,
+                total_shots - success_count
             )
         };
 

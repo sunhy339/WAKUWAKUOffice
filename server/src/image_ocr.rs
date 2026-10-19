@@ -55,7 +55,7 @@ pub fn extract_text_from_attachment(attachment: &ChatAttachment) -> Result<Optio
 
     let image_bytes = decode_data_url(data_url)?;
     let temp_path = std::env::temp_dir().join(format!(
-        "walioffice-ocr-{}.{}",
+        "wakuoffice-ocr-{}.{}",
         uuid::Uuid::new_v4(),
         extension_for_mime(&attachment.mime_type)
     ));

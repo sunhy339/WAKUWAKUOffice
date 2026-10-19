@@ -10,8 +10,8 @@ import { SlidePreview } from '@/components/preview/SlidePreview'
 import { ConversationSidebar } from '@/components/history/ConversationSidebar'
 import { ArtifactPanel } from '@/components/artifacts/ArtifactPanel'
 import { SettingsDialog } from '@/components/settings/SettingsDialog'
-import { AlertCircle, CheckCircle2, Info, Play, X, PanelRightClose, PanelRight, Files, Menu } from 'lucide-react'
-import type { AppSettings, Artifact, ChatAttachment, ConversationRecord, InputRef, LLMProfile, PersistedSession, ProjectMeta, ToolKind, ToolConfigMap } from '@/types'
+import { AlertCircle, CheckCircle2, Info, Play, X, PanelRightClose, PanelRight, Files, Menu, Settings2 } from 'lucide-react'
+import type { AppSettings, Artifact, ChatAttachment, ChatTargetContext, ChatStreamPhase, ConversationRecord, InputRef, LLMProfile, PersistedSession, ProjectMeta, ToolKind, ToolConfigMap } from '@/types'
 import { extractArtifactSummary } from '@/lib/artifact-summary'
 const LOGO_URL = '/logo.png'
 
@@ -82,11 +82,15 @@ const IMAGE_ATTACHMENT_TARGET_BYTES = 1.8 * 1024 * 1024
 const SIDEBAR_MIN_WIDTH = 280
 const SIDEBAR_MAX_WIDTH = 520
 const SIDEBAR_DEFAULT_WIDTH = 340
-const SIDEBAR_WIDTH_STORAGE_KEY = 'walioffice:sidebar-width'
+const SIDEBAR_WIDTH_STORAGE_KEY = 'wakuoffice:sidebar-width'
+const LEGACY_SIDEBAR_WIDTH_STORAGE_KEY = 'walioffice:sidebar-width'
 
 function getStoredSidebarWidth() {
   if (typeof window === 'undefined') return SIDEBAR_DEFAULT_WIDTH
-  const stored = Number(window.localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY))
+  const stored = Number(
+    window.localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY)
+      || window.localStorage.getItem(LEGACY_SIDEBAR_WIDTH_STORAGE_KEY),
+  )
   if (!Number.isFinite(stored)) return SIDEBAR_DEFAULT_WIDTH
   return Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, stored))
 }
@@ -119,7 +123,7 @@ function playConversationDoneSound() {
 }
 
 function isMediaOnlyModel(model?: string) {
-  return /^agnes-(image|video)-/i.test(model || '')
+  return /^(agnes|gpt)-(image|video)-/i.test(model || '') || /^(image|video)-/i.test(model || '')
 }
 
 function pickChatModel(models: string[], fallback = '') {
@@ -180,7 +184,7 @@ export default function Studio() {
   const [followLatestSlide, setFollowLatestSlide] = useState(true)
   const [pptProgress, setPptProgress] = useState<{ current: number; total: number } | null>(null)
   const [streamStatus, setStreamStatus] = useState('空闲')
-  const [streamPhase, setStreamPhase] = useState<'idle' | 'thinking' | 'generating' | 'finishing' | 'done' | 'error'>('idle')
+  const [streamPhase, setStreamPhase] = useState<ChatStreamPhase>('idle')
   const [processLogs, setProcessLogs] = useState<string[]>([])
   const [attachments, setAttachments] = useState<ChatAttachment[]>([])
   const [inputRefs, setInputRefs] = useState<InputRef[]>([])
@@ -191,6 +195,8 @@ export default function Studio() {
   const [sidebarWidth, setSidebarWidth] = useState(getStoredSidebarWidth)
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false)
   const [toast, setToast] = useState<ToastState | null>(null)
+  const [newProjectDialogOpen, setNewProjectDialogOpen] = useState(false)
+  const [newProjectTitle, setNewProjectTitle] = useState('')
   // 每个 tab 的本地 UI 状态（与 store 中的对话状态分离）
   const [tabUiState, setTabUiState] = useState<Record<string, { input: string; attachments: ChatAttachment[]; inputRefs: InputRef[]; streamStatus: string; streamPhase: typeof streamPhase; processLogs: string[]; activeTool: ToolKind; activeProjectId: string | null; selectedTheme: string; toolConfig: ToolConfigMap; showArtifactPanel: boolean; pptProgress: { current: number; total: number } | null; followLatestSlide: boolean }>>({})
   const tabCounterRef = useRef(0)
@@ -543,13 +549,22 @@ export default function Studio() {
     lastActiveAt: tab.lastActiveAt,
   }))
 
-  const handleNewProject = async () => {
+  const handleNewProject = () => {
     if (isStreaming) return
     setActiveView('chat')
-    const title = prompt('请输入项目名称：')
-    if (!title?.trim()) return
+    setNewProjectTitle('')
+    setNewProjectDialogOpen(true)
+  }
+
+  const createProject = async () => {
+    const title = newProjectTitle.trim()
+    if (!title) {
+      showToast('请输入项目名称', 'info')
+      return
+    }
+    setNewProjectDialogOpen(false)
     try {
-      const res = await projectApi.createProject(title.trim(), activeTool)
+      const res = await projectApi.createProject(title, activeTool)
       const newProj = res.data
       setActiveProjectId(newProj.id)
       setActiveTool(newProj.tool_kind || 'general')
@@ -1094,7 +1109,7 @@ export default function Studio() {
     }
   }
 
-  const applyPptArtifact = (artifact: Artifact) => {
+  const applyPptArtifact = (artifact: Artifact, preserveCurrentSlide = false) => {
     applyRealtimePptState({
       project_id: artifact.content?.project_id,
       title: artifact.content?.title || artifact.title,
@@ -1102,7 +1117,7 @@ export default function Studio() {
       slides: artifact.content?.slides,
       history: artifact.content?.history,
     })
-    if (Array.isArray(artifact.content?.slides) && artifact.content.slides.length > 0) {
+    if (!preserveCurrentSlide && Array.isArray(artifact.content?.slides) && artifact.content.slides.length > 0) {
       setCurrentSlide(0)
     }
   }
@@ -1130,14 +1145,18 @@ export default function Studio() {
     return activeTool
   }
 
-  const handleSend = async () => {
-    if ((!input.trim() && attachments.length === 0 && inputRefs.length === 0) || isStreaming) return
+  const handleSend = async (messageOverride?: string, target?: ChatTargetContext) => {
+    const isDirectAction = messageOverride !== undefined
+    const draftInput = isDirectAction ? messageOverride : input
+    const draftAttachments = isDirectAction ? [] : attachments
+    const draftInputRefs = isDirectAction ? [] : inputRefs
+    if ((!draftInput.trim() && draftAttachments.length === 0 && draftInputRefs.length === 0) || isStreaming) return
 
-    const hasImageAttachment = attachments.some((item) => item.kind === 'image')
-    const baseMessage = input.trim() || (hasImageAttachment ? '请识别并说明我上传图片的主要内容。' : '请结合我上传的文件内容继续处理。')
+    const hasImageAttachment = draftAttachments.some((item) => item.kind === 'image')
+    const baseMessage = draftInput.trim() || (hasImageAttachment ? '请识别并说明我上传图片的主要内容。' : '请结合我上传的文件内容继续处理。')
     // 将 @ 引用标签拼接 + 产物内容摘要作为上下文提供给 AI
-    const refsText = inputRefs.map((ref) => ref.refText).join('\n')
-    const refSummaries = inputRefs
+    const refsText = draftInputRefs.map((ref) => ref.refText).join('\n')
+    const refSummaries = draftInputRefs
       .filter((ref) => ref.contentSummary)
       .map((ref) => ref.contentSummary!)
     const refContext = refSummaries.length > 0
@@ -1146,12 +1165,14 @@ export default function Studio() {
     const message = (refsText || refContext)
       ? (baseMessage.trim() ? `${baseMessage}\n\n${refsText}${refContext}` : `${refsText}${refContext}`)
       : baseMessage
-    const pendingAttachments = attachments
-    const inferredTool = inferToolFromMessage(message, pendingAttachments)
+    const pendingAttachments = draftAttachments
+    const inferredTool = target?.operation === 'edit_slide' ? 'ppt' : inferToolFromMessage(message, pendingAttachments)
     if (inferredTool !== activeTool) setActiveTool(inferredTool)
-    setInput('')
-    setAttachments([])
-    setInputRefs([])
+    if (!isDirectAction) {
+      setInput('')
+      setAttachments([])
+      setInputRefs([])
+    }
     setStreaming(true)
     setFollowLatestSlide(true)
     setPptProgress(null)
@@ -1210,7 +1231,7 @@ export default function Studio() {
     try {
       await chatApi.stream(
         message,
-        activeProjectId,
+        target?.operation === 'edit_slide' ? (project?.id || activeProjectId) : activeProjectId,
         sessionId,
         selectedTheme,
         inferredTool,
@@ -1296,7 +1317,7 @@ export default function Studio() {
                 setStreamPhase(data.artifact.status === 'ready' ? 'finishing' : 'generating')
                 setStreamStatus(`已更新产物：${data.artifact.title || '未命名产物'}`)
                 if (data.artifact.kind === 'ppt') {
-                  applyPptArtifact(data.artifact)
+                  applyPptArtifact(data.artifact, target?.operation === 'edit_slide')
                   if (typeof data.artifact.content?.total_slides === 'number') {
                     setPptProgress({
                       current: data.artifact.content?.slide_count || data.artifact.content?.slides?.length || 0,
@@ -1381,7 +1402,7 @@ export default function Studio() {
               }
               const pptArtifact = doneArtifacts.find((item: Artifact) => item.kind === 'ppt')
               if (pptArtifact) {
-                applyPptArtifact(pptArtifact)
+                applyPptArtifact(pptArtifact, target?.operation === 'edit_slide')
                 const total = pptArtifact.content?.total_slides || pptArtifact.content?.slide_count || pptArtifact.content?.slides?.length || 0
                 if (total > 0) {
                   setPptProgress({ current: total, total })
@@ -1421,7 +1442,8 @@ export default function Studio() {
         },
         token,
         abortController.signal,
-        toolConfig
+        toolConfig,
+        target
       )
     } catch (err) {
       console.error('Chat error:', err)
@@ -1459,6 +1481,28 @@ export default function Studio() {
       refreshProjects()
       if (activeTabId) updateTab(activeTabId, { isStreaming: false })
     }
+  }
+
+  const handleEditSlide = (instruction: string) => {
+    const slide = slides[currentSlideIndex]
+    if (!slide || !(project?.id || activeProjectId)) {
+      showToast('当前 PPT 页面还没有准备好，请稍后再试', 'error')
+      return
+    }
+    if (isStreaming) {
+      showToast('当前还有任务在执行，请完成后再修改', 'info')
+      return
+    }
+
+    const target: ChatTargetContext = {
+      operation: 'edit_slide',
+      kind: 'ppt',
+      artifact_id: activeArtifact?.kind === 'ppt' ? activeArtifact.id : undefined,
+      slide_id: slide.id,
+      slide_index: currentSlideIndex,
+      expected_version: activeArtifact?.kind === 'ppt' ? activeArtifact.version : undefined,
+    }
+    void handleSend(`修改当前第 ${currentSlideIndex + 1} 页：${instruction.trim()}`, target)
   }
 
   const handleStop = () => {
@@ -1753,6 +1797,7 @@ export default function Studio() {
             onSelectConversation={handleSelectConversation}
             onSelectProject={handleSelectProject}
             onNewConversation={handleNewTab}
+            onNewProject={handleNewProject}
             onRenameConversation={handleRenameConversation}
             onDeleteConversation={handleDeleteConversation}
             onMoveConversation={handleMoveConversation}
@@ -1791,6 +1836,7 @@ export default function Studio() {
                 onSelectConversation={(id) => { handleSelectConversation(id); setMobileSidebarOpen(false) }}
                 onSelectProject={(id) => { handleSelectProject(id); setMobileSidebarOpen(false) }}
                 onNewConversation={() => { handleNewTab(); setMobileSidebarOpen(false) }}
+                onNewProject={() => { void handleNewProject(); setMobileSidebarOpen(false) }}
                 onRenameConversation={handleRenameConversation}
                 onDeleteConversation={handleDeleteConversation}
                 onMoveConversation={handleMoveConversation}
@@ -1819,7 +1865,7 @@ export default function Studio() {
                 <Menu className="h-5 w-5" />
               </button>
               <div className="flex h-8 w-8 shrink-0 items-center justify-center overflow-hidden rounded-2xl bg-white/70 shadow-sm ring-1 ring-black/[0.04]">
-                <img src={LOGO_URL} alt="WaLiOffice logo" className="h-full w-full object-cover" />
+                <img src={LOGO_URL} alt="WaKuOffice logo" className="h-full w-full object-cover" />
               </div>
               <div className="min-w-0">
                 <div className="truncate text-sm font-semibold tracking-tight text-surface-950">
@@ -1839,8 +1885,22 @@ export default function Studio() {
                 onClick={() => navigate('/files')}
                 className="btn-ghost shrink-0 rounded-full bg-white/45 hover:bg-white/75"
                 title="我的文件"
+                aria-label="我的文件"
               >
                 <Files className="w-4 h-4" />
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (settings) setActiveView('settings')
+                  else showToast('设置正在加载，请稍后再试', 'info')
+                }}
+                className="btn-ghost shrink-0 rounded-full bg-white/45 hover:bg-white/75"
+                title="设置"
+                aria-label="设置"
+              >
+                <Settings2 className="w-4 h-4" />
+                <span className="hidden sm:inline">设置</span>
               </button>
               <button
                 onClick={() => setShowArtifactPanel(!showArtifactPanel)}
@@ -1874,12 +1934,28 @@ export default function Studio() {
 
           <div className="min-h-0 flex-1 overflow-hidden">
             {activeView === 'settings' ? (
-              <SettingsDialog
-                open
-                settings={settings}
-                onClose={() => setActiveView('chat')}
-                onSave={handleSaveSettings}
-              />
+              settings ? (
+                <SettingsDialog
+                  open
+                  settings={settings}
+                  onClose={() => setActiveView('chat')}
+                  onSave={handleSaveSettings}
+                />
+              ) : (
+                <div className="flex h-full items-center justify-center p-6">
+                  <div className="w-full max-w-md rounded-[2rem] border border-black/[0.06] bg-white/78 p-6 text-center shadow-sm backdrop-blur-xl">
+                    <div className="text-base font-bold text-surface-950">设置正在加载</div>
+                    <p className="mt-2 text-sm leading-6 text-surface-500">暂时无法读取本地设置，返回对话后仍可继续使用。</p>
+                    <button
+                      type="button"
+                      onClick={() => setActiveView('chat')}
+                      className="mt-5 rounded-full bg-surface-950 px-5 py-2 text-sm font-semibold text-white hover:bg-surface-800"
+                    >
+                      返回对话
+                    </button>
+                  </div>
+                </div>
+              )
             ) : (
               <ChatPanel
                 messages={messages}
@@ -1935,6 +2011,7 @@ export default function Studio() {
               onOpenChange={setShowArtifactPanel}
               onWideChange={setWideArtifactPanel}
               onSelectSlide={handleSelectSlide}
+              onEditSlide={handleEditSlide}
               onExportPpt={handleExport}
               onPresent={() => setShowPresent(true)}
               messages={messages}
@@ -1966,6 +2043,7 @@ export default function Studio() {
               onOpenChange={(open) => setShowArtifactPanel(open)}
               onWideChange={() => {}}
               onSelectSlide={handleSelectSlide}
+              onEditSlide={handleEditSlide}
               onExportPpt={handleExport}
               onPresent={() => setShowPresent(true)}
               messages={messages}
@@ -1992,6 +2070,56 @@ export default function Studio() {
           startIndex={currentSlideIndex}
           onClose={() => setShowPresent(false)}
         />
+      )}
+      {newProjectDialogOpen && (
+        <div className="fixed inset-0 z-[65] flex items-center justify-center bg-surface-950/20 px-5 backdrop-blur-sm" role="dialog" aria-modal="true" aria-labelledby="new-project-title">
+          <div className="w-full max-w-md rounded-[2rem] border border-black/[0.06] bg-white/95 p-6 shadow-[0_24px_80px_rgba(24,24,27,0.18)]">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h2 id="new-project-title" className="text-lg font-bold text-surface-950">新建项目</h2>
+                <p className="mt-1 text-sm text-surface-500">项目会出现在左侧项目空间，也可以在对话输入框中切换。</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setNewProjectDialogOpen(false)}
+                className="rounded-full p-2 text-surface-400 transition hover:bg-surface-100 hover:text-surface-950"
+                aria-label="关闭新建项目"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <label className="mt-5 block text-xs font-bold uppercase tracking-[0.14em] text-surface-500">
+              项目名称
+              <input
+                autoFocus
+                value={newProjectTitle}
+                onChange={(event) => setNewProjectTitle(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') void createProject()
+                  if (event.key === 'Escape') setNewProjectDialogOpen(false)
+                }}
+                placeholder="例如：2025 年度经营汇报"
+                className="mt-2 w-full rounded-2xl border border-black/10 bg-white px-3 py-3 text-sm text-surface-900 outline-none transition focus:border-surface-500 focus:ring-4 focus:ring-surface-950/5"
+              />
+            </label>
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setNewProjectDialogOpen(false)}
+                className="rounded-full border border-black/10 bg-white px-4 py-2 text-sm font-semibold text-surface-600 transition hover:bg-surface-50"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                onClick={() => void createProject()}
+                className="rounded-full bg-surface-950 px-4 py-2 text-sm font-semibold text-white transition hover:bg-surface-800"
+              >
+                创建项目
+              </button>
+            </div>
+          </div>
+        </div>
       )}
       {toast && (
         <div className="pointer-events-none fixed right-5 top-5 z-[70] flex justify-end" aria-live="polite">

@@ -1,0 +1,2 @@
+ALTER TABLE files ADD COLUMN storage_backend VARCHAR(32) NOT NULL DEFAULT 'local';
+ALTER TABLE files ADD COLUMN storage_key VARCHAR(1000) NULL;

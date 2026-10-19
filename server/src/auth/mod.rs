@@ -1,4 +1,5 @@
 pub mod middleware;
+pub mod password_reset;
 
 use anyhow::Result;
 use chrono::{Duration, Utc};
@@ -13,6 +14,8 @@ pub struct Claims {
     pub username: String,
     pub role: String,
     pub exp: usize,
+    #[serde(default)]
+    pub ver: i64,
 }
 
 pub fn create_token(user: &User) -> Result<String> {
@@ -23,6 +26,7 @@ pub fn create_token(user: &User) -> Result<String> {
         username: user.username.clone(),
         role: user.role.clone(),
         exp,
+        ver: user.auth_version,
     };
     let token = encode(
         &Header::default(),

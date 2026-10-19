@@ -5,6 +5,7 @@ pub mod drawio_generate;
 pub mod image_prompt;
 pub mod local_video;
 pub mod md_generate;
+pub mod ppt_edit;
 pub mod ppt_generate;
 pub mod ppt_plan;
 pub mod sheet_generate;
@@ -21,6 +22,7 @@ pub async fn register_all_tools() {
     REGISTRY
         .register(Arc::new(ppt_generate::PptGenerateTool))
         .await;
+    REGISTRY.register(Arc::new(ppt_edit::PptEditTool)).await;
     REGISTRY
         .register(Arc::new(doc_generate::DocGenerateTool))
         .await;
@@ -48,7 +50,9 @@ pub async fn register_all_tools() {
     REGISTRY
         .register(Arc::new(video_storyboard::VideoStoryboardTool))
         .await;
-    REGISTRY.register(Arc::new(web_search_generic::WebSearchTool)).await;
+    REGISTRY
+        .register(Arc::new(web_search_generic::WebSearchTool))
+        .await;
 
     let tools = REGISTRY.list().await;
     tracing::info!(

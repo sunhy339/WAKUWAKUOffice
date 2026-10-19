@@ -1,8 +1,8 @@
 use crate::db::DbPool;
 use crate::llm::LlmClient;
 use once_cell::sync::Lazy;
-use std::sync::OnceLock;
 use std::sync::Arc;
+use std::sync::OnceLock;
 
 static DB_POOL: OnceLock<DbPool> = OnceLock::new();
 

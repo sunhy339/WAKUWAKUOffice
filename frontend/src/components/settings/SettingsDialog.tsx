@@ -1,4 +1,4 @@
-import { Check, KeyRound, Plus, Trash2, X } from 'lucide-react'
+import { Check, Cpu, Eye, EyeOff, KeyRound, Plus, RefreshCw, SlidersHorizontal, Trash2, X } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { settingsApi } from '@/api'
 import type { AppSettings, LLMProfile, MCPServiceConfig } from '@/types'
@@ -14,6 +14,9 @@ const emptyProfile = (): LLMProfile => ({
   id: `profile-${Date.now()}`,
   name: '新的模型服务',
   base_url: 'http://127.0.0.1:8777/v1',
+  provider: 'OpenAI Compatible',
+  wire_api: 'chat_completions',
+  reasoning_effort: 'medium',
   api_key: '',
   api_keys: [],
   models: [],
@@ -28,6 +31,10 @@ function getProfileKeys(profile: LLMProfile) {
   return Array.from(new Set(merged))
 }
 
+function maskApiKeys(keys: string[]) {
+  return keys.map(() => '••••••••').join('\n')
+}
+
 const emptyMcpServer = (): MCPServiceConfig => ({
   id: `mcp-${Date.now()}`,
   name: '新的 MCP 服务',
@@ -38,15 +45,24 @@ const emptyMcpServer = (): MCPServiceConfig => ({
 })
 
 export function SettingsDialog({ open, settings, onClose, onSave }: SettingsDialogProps) {
-  const [section, setSection] = useState<'llm' | 'base' | 'mcp'>('mcp')
+  const [section, setSection] = useState<'llm' | 'base' | 'mcp'>('llm')
   const [draft, setDraft] = useState<AppSettings | null>(settings)
   const [saving, setSaving] = useState(false)
+  const [fetchingModelsId, setFetchingModelsId] = useState<string | null>(null)
+  const [modelFetchResults, setModelFetchResults] = useState<Record<string, { ok: boolean; message: string }>>({})
+  const [testingLlmId, setTestingLlmId] = useState<string | null>(null)
+  const [llmTestResults, setLlmTestResults] = useState<Record<string, { ok: boolean; message: string }>>({})
+  const [visibleApiKeyProfiles, setVisibleApiKeyProfiles] = useState<Record<string, boolean>>({})
   const [testingMcpId, setTestingMcpId] = useState<string | null>(null)
   const [mcpTestResults, setMcpTestResults] = useState<Record<string, { ok: boolean; message: string; tools: string[] }>>({})
 
   useEffect(() => {
     setDraft(settings)
   }, [settings])
+
+  useEffect(() => {
+    if (open) setSection('llm')
+  }, [open])
 
   const hasChanges = useMemo(() => JSON.stringify(draft) !== JSON.stringify(settings), [draft, settings])
 
@@ -110,6 +126,63 @@ export function SettingsDialog({ open, settings, onClose, onSave }: SettingsDial
 
   const removeMcp = (id: string) => updateDraft({ mcp_servers: draft.mcp_servers.filter((server) => server.id !== id) })
 
+  const fetchModels = async (profile: LLMProfile) => {
+    setFetchingModelsId(profile.id)
+    setModelFetchResults((prev) => ({ ...prev, [profile.id]: { ok: false, message: '正在获取模型列表...' } }))
+    try {
+      const res = await settingsApi.fetchModels({ base_url: profile.base_url, api_keys: getProfileKeys(profile) })
+      const models = Array.isArray(res.data?.models) ? res.data.models : []
+      const currentModels = profile.models || []
+      const mergedModels = Array.from(new Set([...currentModels, ...models]))
+      const nextDefault = profile.default_model && mergedModels.includes(profile.default_model)
+        ? profile.default_model
+        : mergedModels[0] || ''
+      updateProfile(profile.id, { models: mergedModels, default_model: nextDefault })
+      if (profile.id === draft.active_profile_id) {
+        updateDraft({ active_model: nextDefault, default_model: nextDefault })
+      }
+      setModelFetchResults((prev) => ({
+        ...prev,
+        [profile.id]: { ok: true, message: `已获取 ${models.length} 个模型，可在下方调整后保存` },
+      }))
+    } catch (err: any) {
+      setModelFetchResults((prev) => ({
+        ...prev,
+        [profile.id]: { ok: false, message: err.response?.data?.detail || err.message || '获取模型列表失败，可手动填写' },
+      }))
+    } finally {
+      setFetchingModelsId(null)
+    }
+  }
+
+  const testLlm = async (profile: LLMProfile) => {
+    const model = profile.id === draft.active_profile_id && draft.active_model
+      ? draft.active_model
+      : profile.default_model || profile.models[0] || ''
+    setTestingLlmId(profile.id)
+    setLlmTestResults((prev) => ({ ...prev, [profile.id]: { ok: false, message: `正在测试 ${model || '当前模型'}...` } }))
+    try {
+      const res = await settingsApi.testLlm({
+        base_url: profile.base_url,
+        api_keys: getProfileKeys(profile),
+        model,
+        wire_api: profile.wire_api,
+        reasoning_effort: profile.reasoning_effort,
+      })
+      setLlmTestResults((prev) => ({
+        ...prev,
+        [profile.id]: { ok: !!res.data?.ok, message: res.data?.message || '测试完成' },
+      }))
+    } catch (err: any) {
+      setLlmTestResults((prev) => ({
+        ...prev,
+        [profile.id]: { ok: false, message: err.response?.data?.detail || err.message || '连接测试失败' },
+      }))
+    } finally {
+      setTestingLlmId(null)
+    }
+  }
+
   const testMcp = async (server: MCPServiceConfig) => {
     setTestingMcpId(server.id)
     try {
@@ -169,6 +242,8 @@ export function SettingsDialog({ open, settings, onClose, onSave }: SettingsDial
 
           <div className="space-y-1.5">
             {[
+              ['llm', '模型服务', Cpu],
+              ['base', '基础信息', SlidersHorizontal],
               ['mcp', 'MCP 服务', KeyRound],
             ].map(([key, label, Icon]: any) => (
               <button
@@ -196,6 +271,13 @@ export function SettingsDialog({ open, settings, onClose, onSave }: SettingsDial
                   <Plus className="h-4 w-4" />
                   添加配置
                 </button>
+              </div>
+
+              <div className="mb-5 rounded-[1.5rem] border border-blue-200/70 bg-blue-50/70 p-4 text-sm text-blue-900">
+                <div className="font-semibold">本地用户怎么使用</div>
+                <p className="mt-1 leading-6 text-blue-800/80">
+                  在这里填写 OpenAI 兼容服务的 Base URL、API Key 和模型名，保存后即可用于对话。每行一个 Key，服务端会按请求轮询，并在限流或鉴权失败时尝试下一个。配置保存在本机服务端的 SQLite 数据库中，不写入浏览器 localStorage；请不要把数据目录分享给他人。
+                </p>
               </div>
 
               <div className="mb-5 rounded-[1.5rem] border border-black/[0.06] bg-[#f8f5ee]/80 p-4">
@@ -260,6 +342,41 @@ export function SettingsDialog({ open, settings, onClose, onSave }: SettingsDial
                       </div>
 
                       <div className="space-y-3">
+                        <div className="grid gap-3 sm:grid-cols-3">
+                          <label className="block text-xs font-semibold text-surface-500">
+                            Provider
+                            <input
+                              value={profile.provider || ''}
+                              onChange={(event) => updateProfile(profile.id, { provider: event.target.value })}
+                              placeholder="OpenAI"
+                              className="mt-1.5 w-full rounded-2xl border border-black/10 bg-white px-3 py-2.5 text-sm text-surface-900 outline-none focus:border-surface-500"
+                            />
+                          </label>
+                          <label className="block text-xs font-semibold text-surface-500">
+                            Wire API
+                            <select
+                              value={profile.wire_api || 'chat_completions'}
+                              onChange={(event) => updateProfile(profile.id, { wire_api: event.target.value })}
+                              className="mt-1.5 w-full rounded-2xl border border-black/10 bg-white px-3 py-2.5 text-sm text-surface-900 outline-none focus:border-surface-500"
+                            >
+                              <option value="chat_completions">Chat Completions</option>
+                              <option value="responses">Responses</option>
+                            </select>
+                          </label>
+                          <label className="block text-xs font-semibold text-surface-500">
+                            Reasoning
+                            <select
+                              value={profile.reasoning_effort || 'medium'}
+                              onChange={(event) => updateProfile(profile.id, { reasoning_effort: event.target.value })}
+                              className="mt-1.5 w-full rounded-2xl border border-black/10 bg-white px-3 py-2.5 text-sm text-surface-900 outline-none focus:border-surface-500"
+                            >
+                              <option value="none">None</option>
+                              <option value="low">Low</option>
+                              <option value="medium">Medium</option>
+                              <option value="high">High</option>
+                            </select>
+                          </label>
+                        </div>
                         <label className="block text-xs font-semibold text-surface-500">
                           Base URL
                           <input
@@ -267,18 +384,63 @@ export function SettingsDialog({ open, settings, onClose, onSave }: SettingsDial
                             onChange={(event) => updateProfile(profile.id, { base_url: event.target.value })}
                             className="mt-1.5 w-full rounded-2xl border border-black/10 bg-white px-3 py-2.5 text-sm text-surface-900 outline-none focus:border-surface-500"
                           />
+                          <button
+                            type="button"
+                            onClick={() => void fetchModels(profile)}
+                            disabled={fetchingModelsId === profile.id || !profile.base_url.trim()}
+                            className="mt-2 inline-flex items-center gap-1.5 rounded-full border border-black/10 bg-white px-3 py-1.5 text-[11px] font-semibold text-surface-600 hover:bg-surface-50 disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            <RefreshCw className={`h-3.5 w-3.5 ${fetchingModelsId === profile.id ? 'animate-spin' : ''}`} />
+                            {fetchingModelsId === profile.id ? '获取中...' : '从 Base URL 获取模型'}
+                          </button>
+                          {modelFetchResults[profile.id] && (
+                            <div className={`mt-2 text-[11px] ${modelFetchResults[profile.id].ok ? 'text-emerald-600' : 'text-surface-500'}`}>
+                              {modelFetchResults[profile.id].message}
+                            </div>
+                          )}
                         </label>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => void testLlm(profile)}
+                            disabled={testingLlmId === profile.id || !profile.base_url.trim() || !(profile.default_model || profile.models[0])}
+                            className="inline-flex items-center gap-1.5 rounded-full border border-black/10 bg-white px-3 py-1.5 text-[11px] font-semibold text-surface-600 hover:bg-surface-50 disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            <Check className={`h-3.5 w-3.5 ${testingLlmId === profile.id ? 'animate-pulse' : ''}`} />
+                            {testingLlmId === profile.id ? '测试中...' : '测试当前模型连接'}
+                          </button>
+                          {llmTestResults[profile.id] && (
+                            <div className={`text-[11px] ${llmTestResults[profile.id].ok ? 'text-emerald-600' : 'text-red-600'}`}>
+                              {llmTestResults[profile.id].message}
+                            </div>
+                          )}
+                        </div>
                         <label className="block text-xs font-semibold text-surface-500">
-                          API Key 池（每行一个，按请求轮询负载）
+                          <span className="flex items-center justify-between gap-3">
+                            <span>API Key 池（每行一个，按请求轮询负载）</span>
+                            <button
+                              type="button"
+                              onClick={() => setVisibleApiKeyProfiles((prev) => ({ ...prev, [profile.id]: !prev[profile.id] }))}
+                              className="inline-flex shrink-0 items-center gap-1 rounded-full border border-black/10 bg-white px-2.5 py-1 text-[11px] font-semibold text-surface-600 hover:bg-surface-50"
+                              aria-label={visibleApiKeyProfiles[profile.id] ? '隐藏 API Key' : '显示 API Key'}
+                            >
+                              {visibleApiKeyProfiles[profile.id] ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+                              {visibleApiKeyProfiles[profile.id] ? '隐藏' : '显示'}
+                            </button>
+                          </span>
                           <textarea
-                            value={getProfileKeys(profile).join('\n')}
+                            value={visibleApiKeyProfiles[profile.id] ? getProfileKeys(profile).join('\n') : maskApiKeys(getProfileKeys(profile))}
+                            readOnly={!visibleApiKeyProfiles[profile.id]}
                             onChange={(event) => {
+                              if (!visibleApiKeyProfiles[profile.id]) return
                               const apiKeys = event.target.value.split('\n').map((item) => item.trim()).filter(Boolean)
                               updateProfile(profile.id, { api_keys: apiKeys, api_key: '', has_api_key: apiKeys.length > 0 })
                             }}
                             rows={4}
-                            placeholder="sk-..."
-                            className="mt-1.5 w-full resize-y rounded-2xl border border-black/10 bg-white px-3 py-2.5 font-mono text-xs text-surface-900 outline-none focus:border-surface-500"
+                            placeholder={visibleApiKeyProfiles[profile.id] ? 'sk-...' : '已隐藏，点击“显示”后编辑'}
+                            autoComplete="off"
+                            spellCheck={false}
+                            className={`mt-1.5 w-full resize-y rounded-2xl border border-black/10 px-3 py-2.5 font-mono text-xs text-surface-900 outline-none focus:border-surface-500 ${visibleApiKeyProfiles[profile.id] ? 'bg-white' : 'cursor-default bg-surface-50 text-surface-500'}`}
                           />
                         </label>
                         <label className="block text-xs font-semibold text-surface-500">

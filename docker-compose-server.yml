@@ -1,0 +1,95 @@
+# WaKuOffice 独立服务器部署配置。
+# 该 Compose 项目使用独立容器、端口和数据卷，不依赖或重启服务器上的其他项目。
+# 使用前在同目录创建 .env.server，启动时通过 --env-file .env.server 传入。
+
+services:
+  minio:
+    image: quay.io/minio/minio:latest
+    container_name: wakuoffice-minio
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: "${STORAGE_S3_ACCESS_KEY:?请配置 STORAGE_S3_ACCESS_KEY}"
+      MINIO_ROOT_PASSWORD: "${STORAGE_S3_SECRET_KEY:?请配置 STORAGE_S3_SECRET_KEY}"
+    volumes:
+      - wakuoffice-minio-data:/data
+    expose:
+      - "9000"
+      - "9001"
+    # 只对本机开放管理控制台；需要远程管理时使用 SSH 隧道，避免暴露管理端口。
+    ports:
+      - "127.0.0.1:19001:9001"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  minio-init:
+    image: quay.io/minio/minio:latest
+    container_name: wakuoffice-minio-init
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        mc alias set local http://minio:9000 "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}";
+        mc mb --ignore-existing "local/$${STORAGE_S3_BUCKET}";
+    environment:
+      MINIO_ROOT_USER: "${STORAGE_S3_ACCESS_KEY:?请配置 STORAGE_S3_ACCESS_KEY}"
+      MINIO_ROOT_PASSWORD: "${STORAGE_S3_SECRET_KEY:?请配置 STORAGE_S3_SECRET_KEY}"
+      STORAGE_S3_BUCKET: "${STORAGE_S3_BUCKET:-wakuoffice}"
+    depends_on:
+      minio:
+        condition: service_healthy
+    restart: "no"
+
+  walioffice:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: wakuoffice:server
+    container_name: wakuoffice
+    env_file:
+      - ../.env.server
+    environment:
+      AIPPT_APP_NAME: "WaKuOffice"
+      AIPPT_HOST: "0.0.0.0"
+      AIPPT_PORT: "8000"
+      AIPPT_AUTH_MODE: "account"
+      AIPPT_DATA_DIR: "/app/data"
+      AIPPT_PROJECTS_DIR: "/app/data/projects"
+      AIPPT_SESSIONS_DIR: "/app/data/sessions"
+      AIPPT_RENDER_OUTPUT_DIR: "/app/outputs"
+      STORAGE_BACKEND: "s3"
+      STORAGE_S3_ENDPOINT: "http://minio:9000"
+      STORAGE_S3_REGION: "us-east-1"
+      STORAGE_S3_BUCKET: "${STORAGE_S3_BUCKET:-wakuoffice}"
+      STORAGE_S3_ACCESS_KEY: "${STORAGE_S3_ACCESS_KEY:?请配置 STORAGE_S3_ACCESS_KEY}"
+      STORAGE_S3_SECRET_KEY: "${STORAGE_S3_SECRET_KEY:?请配置 STORAGE_S3_SECRET_KEY}"
+      STORAGE_S3_PATH_STYLE: "true"
+      AIPPT_CORS_ORIGINS: "${AIPPT_CORS_ORIGINS:-http://101.126.33.248:8000}"
+    ports:
+      - "8000:8000"
+    volumes:
+      - wakuoffice-data:/app/data
+      - wakuoffice-outputs:/app/outputs
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    init: true
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:8000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  wakuoffice-minio-data:
+  wakuoffice-data:
+  wakuoffice-outputs:

@@ -2,6 +2,7 @@ use crate::auth::middleware::AuthUser;
 use crate::db::file_repo;
 use crate::error::AppError;
 use crate::file_extract;
+use crate::storage;
 use axum::body::Body;
 use axum::extract::{DefaultBodyLimit, Multipart, Path, Query};
 use axum::http::{header, HeaderMap, StatusCode};
@@ -10,7 +11,7 @@ use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::json;
-use std::path::{Path as FsPath, PathBuf};
+use std::path::Path as FsPath;
 
 const MAX_UPLOAD_BYTES: usize = 50 * 1024 * 1024;
 
@@ -138,23 +139,18 @@ async fn upload_file(
         let file_type = infer_file_type(&safe_name, &mime_type);
         let extracted =
             file_extract::extract_text_from_bytes(&safe_name, &mime_type, data.as_ref());
-        let extension = FsPath::new(&safe_name)
-            .extension()
-            .and_then(|value| value.to_str())
-            .filter(|value| !value.trim().is_empty())
-            .map(|value| format!(".{value}"))
-            .unwrap_or_default();
-        let storage_name = format!("{}{}", uuid::Uuid::new_v4(), extension);
-        let storage_dir = user_file_dir(&user.0.id);
-        tokio::fs::create_dir_all(&storage_dir).await?;
-        let storage_path = storage_dir.join(storage_name);
-        tokio::fs::write(&storage_path, data.as_ref()).await?;
+        let storage_key = storage::new_key(&user.0.id, &safe_name);
+        let stored = storage::put(&storage_key, data.as_ref(), &mime_type)
+            .await
+            .map_err(AppError::Internal)?;
 
-        let file = file_repo::create_file(
+        let file = match file_repo::create_file(
             &pool,
             &user.0.id,
             &safe_name,
-            &storage_path.to_string_lossy(),
+            stored.local_path.as_deref().unwrap_or(""),
+            &stored.backend,
+            Some(&stored.key),
             &file_type,
             data.len() as i64,
             folder_id.as_deref(),
@@ -166,7 +162,20 @@ async fn upload_file(
                 "text_chars": extracted.text.chars().count(),
                 "extracted_text": extracted.text,
             })),
-        ).await?;
+        )
+        .await
+        {
+            Ok(file) => file,
+            Err(error) => {
+                let _ = storage::delete(
+                    &stored.backend,
+                    Some(&stored.key),
+                    stored.local_path.as_deref().unwrap_or(""),
+                )
+                .await;
+                return Err(error);
+            }
+        };
         return Ok(Json(json!({ "ok": true, "file": file })));
     }
 
@@ -239,11 +248,8 @@ async fn download_file(user: AuthUser, Path(id): Path<String>) -> Result<Respons
     let file = file_repo::get_file(&pool, &user.0.id, &id)
         .await?
         .ok_or_else(|| AppError::NotFound("文件不存在".into()))?;
-    let path = PathBuf::from(&file.file_path);
-    if !path.exists() {
-        return Err(AppError::NotFound("文件实体不存在".into()));
-    }
-    export_response(&path, &file.name)
+    let data = read_file_bytes(&file).await?;
+    export_bytes(&data, &file.name)
 }
 
 async fn stream_file(
@@ -276,18 +282,16 @@ async fn stream_file(
     let file = file_repo::get_file(&pool, &user.id, &id)
         .await?
         .ok_or_else(|| AppError::NotFound("文件不存在".into()))?;
-    let path = PathBuf::from(&file.file_path);
-    if !path.exists() {
-        return Err(AppError::NotFound("文件实体不存在".into()));
-    }
-
-    let data = tokio::fs::read(&path).await?;
+    let data = read_file_bytes(&file).await?;
     let mime = mime_guess::from_path(&file.name).first_or_octet_stream();
 
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, mime.as_ref())
-        .header(header::CONTENT_DISPOSITION, format!("inline; filename=\"{}\"", file.name))
+        .header(
+            header::CONTENT_DISPOSITION,
+            format!("inline; filename=\"{}\"", file.name),
+        )
         .header(header::CACHE_CONTROL, "private, max-age=3600")
         .header(header::ACCEPT_RANGES, "bytes")
         .body(Body::from(data))
@@ -318,11 +322,7 @@ async fn get_file_content(
         }
     }
 
-    let path = PathBuf::from(&file.file_path);
-    if !path.exists() {
-        return Err(AppError::NotFound("文件实体不存在".into()));
-    }
-    let data = tokio::fs::read(&path).await?;
+    let data = read_file_bytes(&file).await?;
     let mime_type = file
         .metadata
         .as_ref()
@@ -352,27 +352,28 @@ async fn delete_file(
     let pool = crate::state::db_pool();
     let deleted = file_repo::delete_file(&pool, &user.0.id, &id).await?;
     if let Some(file) = deleted {
-        let _ = tokio::fs::remove_file(&file.file_path).await;
+        if let Err(error) = storage::delete(
+            &file.storage_backend,
+            file.storage_key.as_deref(),
+            &file.file_path,
+        )
+        .await
+        {
+            tracing::warn!(file_id = %file.id, %error, "文件记录已删除，但文件实体清理失败");
+        }
         return Ok(Json(json!({ "deleted": true, "id": id })));
     }
     Ok(Json(json!({ "deleted": false, "id": id })))
 }
 
-async fn get_file_thumbnail(
-    user: AuthUser,
-    Path(id): Path<String>,
-) -> Result<Response, AppError> {
+async fn get_file_thumbnail(user: AuthUser, Path(id): Path<String>) -> Result<Response, AppError> {
     let pool = crate::state::db_pool();
     let file = file_repo::get_file(&pool, &user.0.id, &id)
         .await?
         .ok_or_else(|| AppError::NotFound("文件不存在".into()))?;
 
     if file.file_type == "image" {
-        let path = PathBuf::from(&file.file_path);
-        if !path.exists() {
-            return Err(AppError::NotFound("文件实体不存在".into()));
-        }
-        let data = tokio::fs::read(&path).await?;
+        let data = read_file_bytes(&file).await?;
         let mime = mime_guess::from_path(&file.name).first_or_octet_stream();
         return Response::builder()
             .status(StatusCode::OK)
@@ -386,7 +387,8 @@ async fn get_file_thumbnail(
         "file_type": file.file_type,
         "name": file.name,
         "file_size": file.file_size,
-    }).to_string();
+    })
+    .to_string();
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/json")
@@ -402,11 +404,6 @@ async fn get_file_preview(
     let file = file_repo::get_file(&pool, &user.0.id, &id)
         .await?
         .ok_or_else(|| AppError::NotFound("文件不存在".into()))?;
-
-    let path = PathBuf::from(&file.file_path);
-    if !path.exists() {
-        return Err(AppError::NotFound("文件实体不存在".into()));
-    }
 
     let extension = FsPath::new(&file.name)
         .extension()
@@ -426,7 +423,12 @@ async fn get_file_preview(
                 .to_string()
         });
 
-    if file.file_type == "video" || matches!(extension.as_str(), "mp4" | "webm" | "avi" | "mov" | "mkv" | "flv" | "wmv" | "m4v" | "3gp" | "ogv") {
+    if file.file_type == "video"
+        || matches!(
+            extension.as_str(),
+            "mp4" | "webm" | "avi" | "mov" | "mkv" | "flv" | "wmv" | "m4v" | "3gp" | "ogv"
+        )
+    {
         return Ok(Json(json!({
             "id": file.id,
             "name": file.name,
@@ -438,8 +440,14 @@ async fn get_file_preview(
         })));
     }
 
-    if file.file_type == "image" || matches!(extension.as_str(), "png" | "jpg" | "jpeg" | "webp" | "gif" | "svg") {
-        let data = tokio::fs::read(&path).await?;
+    let data = read_file_bytes(&file).await?;
+
+    if file.file_type == "image"
+        || matches!(
+            extension.as_str(),
+            "png" | "jpg" | "jpeg" | "webp" | "gif" | "svg"
+        )
+    {
         let b64 = base64_encode(&data);
         return Ok(Json(json!({
             "id": file.id,
@@ -453,7 +461,7 @@ async fn get_file_preview(
     }
 
     if extension == "drawio" || extension == "xml" {
-        let text = tokio::fs::read_to_string(&path).await?;
+        let text = String::from_utf8_lossy(&data);
         return Ok(Json(json!({
             "id": file.id,
             "name": file.name,
@@ -465,7 +473,7 @@ async fn get_file_preview(
     }
 
     if matches!(extension.as_str(), "md" | "markdown" | "txt") {
-        let text = tokio::fs::read_to_string(&path).await?;
+        let text = String::from_utf8_lossy(&data);
         return Ok(Json(json!({
             "id": file.id,
             "name": file.name,
@@ -476,7 +484,6 @@ async fn get_file_preview(
         })));
     }
 
-    let data = tokio::fs::read(&path).await?;
     let structured = file_extract::extract_structured(&file.name, &mime_type, &data);
     let preview_type = match extension.as_str() {
         "xlsx" | "xls" | "csv" | "tsv" => "spreadsheet",
@@ -535,7 +542,8 @@ async fn create_folder(
     if let Some(parent_id) = payload.parent_id.as_deref() {
         ensure_folder_owner(&pool, &user.0.id, parent_id).await?;
     }
-    let folder = file_repo::create_folder(&pool, &user.0.id, &name, payload.parent_id.as_deref()).await?;
+    let folder =
+        file_repo::create_folder(&pool, &user.0.id, &name, payload.parent_id.as_deref()).await?;
     Ok(Json(json!({ "ok": true, "folder": folder })))
 }
 
@@ -544,10 +552,20 @@ async fn delete_folder(
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let pool = crate::state::db_pool();
-    let existed = file_repo::get_folder(&pool, &user.0.id, &id).await?.is_some();
+    let existed = file_repo::get_folder(&pool, &user.0.id, &id)
+        .await?
+        .is_some();
     let removed_files = file_repo::delete_folder_tree(&pool, &user.0.id, &id).await?;
     for file in removed_files {
-        let _ = tokio::fs::remove_file(&file.file_path).await;
+        if let Err(error) = storage::delete(
+            &file.storage_backend,
+            file.storage_key.as_deref(),
+            &file.file_path,
+        )
+        .await
+        {
+            tracing::warn!(file_id = %file.id, %error, "文件夹记录已删除，但文件实体清理失败");
+        }
     }
     Ok(Json(json!({ "deleted": existed, "id": id })))
 }
@@ -572,15 +590,24 @@ fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
         .map(ToString::to_string)
 }
 
-fn user_file_dir(owner_id: &str) -> PathBuf {
-    PathBuf::from(&crate::config::config().data_dir)
-        .join("files")
-        .join(owner_id)
+async fn read_file_bytes(file: &file_repo::FileRow) -> Result<Vec<u8>, AppError> {
+    storage::get(
+        &file.storage_backend,
+        file.storage_key.as_deref(),
+        &file.file_path,
+    )
+    .await
+    .map_err(|error| match error {
+        storage::StorageReadError::NotFound => AppError::NotFound("文件实体不存在".into()),
+        storage::StorageReadError::Backend(error) => {
+            tracing::error!(file_id = %file.id, %error, "读取文件实体失败");
+            AppError::Internal(error)
+        }
+    })
 }
 
-fn export_response(path: &FsPath, filename: &str) -> Result<Response, AppError> {
-    let data = std::fs::read(path)?;
-    let mime = mime_guess::from_path(path).first_or_octet_stream();
+fn export_bytes(data: &[u8], filename: &str) -> Result<Response, AppError> {
+    let mime = mime_guess::from_path(filename).first_or_octet_stream();
     let encoded = urlencoding::encode(filename);
     Response::builder()
         .status(StatusCode::OK)
@@ -592,7 +619,7 @@ fn export_response(path: &FsPath, filename: &str) -> Result<Response, AppError> 
                 filename, encoded
             ),
         )
-        .body(Body::from(data))
+        .body(Body::from(data.to_vec()))
         .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))
 }
 
@@ -635,7 +662,9 @@ fn infer_file_type(name: &str, mime_type: &str) -> String {
         "xls" | "xlsx" | "csv" | "tsv" => "excel".into(),
         "drawio" | "xml" => "drawio".into(),
         "png" | "jpg" | "jpeg" | "webp" | "gif" | "svg" => "image".into(),
-        "mp4" | "webm" | "avi" | "mov" | "mkv" | "flv" | "wmv" | "m4v" | "3gp" | "ogv" => "video".into(),
+        "mp4" | "webm" | "avi" | "mov" | "mkv" | "flv" | "wmv" | "m4v" | "3gp" | "ogv" => {
+            "video".into()
+        }
         _ if mime_type.starts_with("image/") => "image".into(),
         _ if mime_type.starts_with("video/") => "video".into(),
         _ if mime_type.contains("spreadsheet") || mime_type.contains("excel") => "excel".into(),

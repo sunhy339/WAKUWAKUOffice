@@ -8,6 +8,7 @@ import { DrawIoEmbed, type DrawIoEmbedRef } from '@/lib/react-drawio'
 import { EChartsView } from '@/components/preview/EChartsView'
 import { SlideList } from '@/components/slides/SlideList'
 import { SlidePreview } from '@/components/preview/SlidePreview'
+import { SlideEditComposer } from '@/components/artifacts/SlideEditComposer'
 import { Toolbar } from '@/components/toolbar/Toolbar'
 import { WordPreview } from '@/components/artifacts/WordPreview'
 import type { Artifact, ChatMessage, PPTProject, Slide, ToolKind } from '@/types'
@@ -25,6 +26,7 @@ interface ArtifactPanelProps {
   onOpenChange: (open: boolean) => void
   onWideChange: (wide: boolean) => void
   onSelectSlide: (index: number) => void
+  onEditSlide: (instruction: string) => void
   onExportPpt: () => void
   onPresent: () => void
   messages: ChatMessage[]
@@ -826,6 +828,7 @@ export function ArtifactPanel({
   onOpenChange,
   onWideChange,
   onSelectSlide,
+  onEditSlide,
   onExportPpt,
   onPresent,
   messages,
@@ -841,6 +844,7 @@ export function ArtifactPanel({
   isMobile,
 }: ArtifactPanelProps) {
   const [panelWidth, setPanelWidth] = useState(isWide ? 760 : 560)
+  const [showSlideEdit, setShowSlideEdit] = useState(false)
   const draggingRef = useRef(false)
   const artifactTurnGroups = useMemo(() => groupArtifactsByTurn(artifacts, messages), [artifacts, messages])
   const activeArtifactTurn = findArtifactTurnGroup(activeArtifact?.id || null, artifactTurnGroups)
@@ -886,6 +890,8 @@ export function ArtifactPanel({
   const effectiveTool = activeArtifact?.tool_kind || activeTool
   const headerTitle = activeArtifact?.title || titleMap[effectiveTool] || '成果展示'
   const canExportActiveArtifact = activeArtifact?.kind === 'document' || activeArtifact?.kind === 'markdown' || activeArtifact?.kind === 'sheet' || activeArtifact?.kind === 'drawio'
+  const canEditCurrentSlide = effectiveTool === 'ppt' && slides.length > 0 && !!slides[currentSlideIndex]
+  const currentSlide = slides[currentSlideIndex]
 
   // 移动端全屏覆盖模式
   if (isMobile) {
@@ -905,6 +911,15 @@ export function ArtifactPanel({
           <div className="flex shrink-0 items-center gap-1.5">
             {effectiveTool === 'ppt' && (
               <>
+                <button
+                  className="btn-secondary h-8 px-2.5 text-xs"
+                  disabled={!canEditCurrentSlide || isGeneratingPpt}
+                  onClick={() => setShowSlideEdit((value) => !value)}
+                  title="使用 AI 修改当前页"
+                >
+                  <Sparkles className="h-3.5 w-3.5" />
+                  AI 修改
+                </button>
                 <button className="btn-secondary h-8 px-2.5 text-xs" disabled={!project} onClick={onPresent}>演示</button>
                 <button className="btn-secondary h-8 px-2.5 text-xs" disabled={!project} onClick={onExportPpt}><Download className="h-3.5 w-3.5" /></button>
               </>
@@ -924,6 +939,18 @@ export function ArtifactPanel({
             <button className="btn-ghost h-8 px-2" onClick={() => onOpenChange(false)} title="关闭">关闭</button>
           </div>
         </div>
+
+        {showSlideEdit && currentSlide && (
+          <SlideEditComposer
+            slide={currentSlide}
+            slideNumber={currentSlideIndex + 1}
+            isSubmitting={isGeneratingPpt}
+            onSubmit={(instruction) => {
+              onEditSlide(instruction)
+            }}
+            onClose={() => setShowSlideEdit(false)}
+          />
+        )}
 
         {/* 产物切换区 */}
         {artifacts.length > 0 && (
@@ -1004,6 +1031,15 @@ export function ArtifactPanel({
         <div className="flex items-center gap-1.5">
           {effectiveTool === 'ppt' && (
             <>
+              <button
+                className="btn-secondary h-8 px-2.5 text-xs"
+                disabled={!canEditCurrentSlide || isGeneratingPpt}
+                onClick={() => setShowSlideEdit((value) => !value)}
+                title="使用 AI 修改当前页"
+              >
+                <Sparkles className="h-3.5 w-3.5" />
+                AI 修改
+              </button>
               <button className="btn-secondary h-8 px-2.5 text-xs" disabled={!project} onClick={onPresent}>演示</button>
               <button className="btn-secondary h-8 px-2.5 text-xs" disabled={!project} onClick={onExportPpt}><Download className="h-3.5 w-3.5" />导出</button>
             </>
@@ -1077,6 +1113,17 @@ export function ArtifactPanel({
 
         <div className="min-w-0 flex-1 overflow-hidden flex flex-col">
           {effectiveTool === 'ppt' && <Toolbar />}
+          {showSlideEdit && currentSlide && (
+            <SlideEditComposer
+              slide={currentSlide}
+              slideNumber={currentSlideIndex + 1}
+              isSubmitting={isGeneratingPpt}
+              onSubmit={(instruction) => {
+                onEditSlide(instruction)
+              }}
+              onClose={() => setShowSlideEdit(false)}
+            />
+          )}
           {effectiveTool === 'ppt' && isGeneratingPpt && pptProgress && pptProgress.total > 0 && (
             <div className="shrink-0 border-b border-surface-200 bg-amber-50/80 px-6 py-3">
               <div className="flex items-center justify-between gap-3">

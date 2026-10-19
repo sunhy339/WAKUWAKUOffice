@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use crate::models::{Artifact, ChatAttachment};
+use crate::models::{Artifact, ChatAttachment, ChatTargetContext};
 
 /// 工具执行上下文
 #[derive(Clone)]
@@ -22,6 +22,8 @@ pub struct ToolContext {
     pub scratchpad: Arc<Mutex<HashMap<String, serde_json::Value>>>,
     /// 用户工具配置（前端传入，如视频时长、宽高比等）
     pub tool_config: Option<serde_json::Value>,
+    /// 当前请求的结构化目标（如 PPT 指定幻灯片编辑）
+    pub target: Option<ChatTargetContext>,
 }
 
 impl ToolContext {
@@ -43,6 +45,7 @@ impl ToolContext {
             emit: Arc::new(emit),
             scratchpad: Arc::new(Mutex::new(HashMap::new())),
             tool_config: None,
+            target: None,
         }
     }
 
@@ -54,6 +57,11 @@ impl ToolContext {
     /// 设置会话中已有的产物历史
     pub fn with_prior_artifacts(mut self, artifacts: Vec<Artifact>) -> Self {
         self.prior_artifacts = artifacts;
+        self
+    }
+
+    pub fn with_target(mut self, target: Option<ChatTargetContext>) -> Self {
+        self.target = target;
         self
     }
 
@@ -88,6 +96,9 @@ pub struct ToolResult {
     pub error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub artifacts: Option<Vec<ToolArtifact>>,
+    /// 用于更新已有产物的内部事件，不直接暴露给 LLM。
+    #[serde(skip)]
+    pub artifact_updates: Option<Vec<Artifact>>,
     /// 给 LLM 的观察文本（ReAct Observation）
     pub observation: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -101,6 +112,7 @@ impl ToolResult {
             data: None,
             error: None,
             artifacts: Some(artifacts),
+            artifact_updates: None,
             observation: observation.into(),
             continue_loop: None,
         }
@@ -113,6 +125,7 @@ impl ToolResult {
             data: None,
             error: Some(obs.clone()),
             artifacts: None,
+            artifact_updates: None,
             observation: obs,
             continue_loop: None,
         }
@@ -142,6 +155,11 @@ pub type DynTool = Arc<dyn OfficeTool>;
 impl ToolResult {
     pub fn with_data(mut self, data: serde_json::Value) -> Self {
         self.data = Some(data);
+        self
+    }
+
+    pub fn with_artifact_updates(mut self, artifacts: Vec<Artifact>) -> Self {
+        self.artifact_updates = Some(artifacts);
         self
     }
 }

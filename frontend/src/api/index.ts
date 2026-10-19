@@ -1,7 +1,7 @@
 import axios from 'axios';
 import { useAuthStore } from '@/stores/auth-store';
 import { normalizeChatSseEvent, parseSseData } from '@/lib/chat-events';
-import type { TokenResponse, ToolKind, Artifact, PersistedSession, AppSettings, MCPServiceConfig, ChatAttachment, ChatSSEEvent } from '@/types';
+import type { TokenResponse, ToolKind, Artifact, PersistedSession, AppSettings, MCPServiceConfig, ChatAttachment, ChatSSEEvent, ChatTargetContext } from '@/types';
 
 const API_BASE = '/api';
 
@@ -31,12 +31,18 @@ api.interceptors.response.use(
 
 // ===== 认证 API =====
 export const authApi = {
+  getMode: () => api.get<{ mode: 'account' | 'local' }>('/auth/mode'),
   login: (username: string, password: string) =>
     api.post<TokenResponse>('/auth/login', { username, password }),
   verificationLogin: (code: string) =>
     api.post<TokenResponse>('/auth/verification-login', { code }),
   register: (username: string, email: string, password: string) =>
     api.post<TokenResponse>('/auth/register', { username, email, password }),
+  localSession: () => api.post<TokenResponse>('/auth/local-session'),
+  requestPasswordReset: (email: string) =>
+    api.post<{ message: string; reset_url?: string }>('/auth/password-reset/request', { email }),
+  confirmPasswordReset: (token: string, password: string) =>
+    api.post<{ message: string }>('/auth/password-reset/confirm', { token, password }),
   getMe: () => api.get('/auth/me'),
   changePassword: (oldPassword: string, newPassword: string) =>
     api.post('/auth/change-password', { old_password: oldPassword, new_password: newPassword }),
@@ -97,6 +103,15 @@ export const projectApi = {
 export const settingsApi = {
   getSettings: () => api.get<AppSettings>('/settings'),
   saveSettings: (payload: AppSettings) => api.put<AppSettings>('/settings', payload),
+  fetchModels: (payload: { base_url: string; api_keys: string[] }) =>
+    api.post<{ models: string[]; endpoint: string }>('/settings/models', payload),
+  testLlm: (payload: {
+    base_url: string
+    api_keys: string[]
+    model: string
+    wire_api?: string
+    reasoning_effort?: string
+  }) => api.post<{ ok: boolean; message: string; model: string; wire_api: string; elapsed_ms: number }>('/settings/llm/test', payload),
   testMcp: (payload: MCPServiceConfig) => api.post('/settings/mcp/test', payload),
 };
 
@@ -161,7 +176,8 @@ export const chatApi = {
     onEvent: (event: ChatSSEEvent) => void,
     token: string,
     signal?: AbortSignal,
-    toolConfig?: Record<string, any>
+    toolConfig?: Record<string, any>,
+    target?: ChatTargetContext
   ) => {
     const response = await fetch(`${API_BASE}/chat/stream`, {
       method: 'POST',
@@ -178,6 +194,7 @@ export const chatApi = {
         model,
         attachments,
         tool_config: toolConfig,
+        target,
       }),
       signal,
     });

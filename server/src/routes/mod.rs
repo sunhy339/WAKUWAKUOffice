@@ -11,9 +11,9 @@ pub mod session;
 pub mod settings;
 
 use axum::Router;
+use tower_http::compression::CompressionLayer;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::ServeDir;
-use tower_http::compression::CompressionLayer;
 
 pub fn build_router() -> Router {
     let cors = CorsLayer::new()

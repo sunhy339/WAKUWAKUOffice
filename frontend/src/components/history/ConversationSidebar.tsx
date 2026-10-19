@@ -1,4 +1,4 @@
-import { Bot, BrainCircuit, ChevronDown, Clapperboard, Edit3, FileText, Folder, Github, Image, LayoutDashboard, LogOut, MessageSquare, MoreHorizontal, PenTool, Plus, Search, Sheet, Sparkles, Trash2, X } from 'lucide-react'
+import { Bot, BrainCircuit, ChevronDown, Clapperboard, Edit3, FileText, Folder, Image, LayoutDashboard, LogOut, MessageSquare, MoreHorizontal, PenTool, Plus, Search, Sheet, Sparkles, Trash2, X } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import type { CSSProperties, DragEvent } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
@@ -42,6 +42,7 @@ interface ConversationSidebarProps {
   onSelectConversation?: (id: string) => void
   onSelectProject?: (projectId: string) => void
   onNewConversation?: () => void
+  onNewProject?: () => void
   onRenameConversation?: (id: string, title: string) => void
   onDeleteConversation?: (id: string) => void
   onDeleteProject?: (projectId: string) => void
@@ -130,6 +131,7 @@ export function ConversationSidebar({
   onSelectConversation,
   onSelectProject,
   onNewConversation,
+  onNewProject,
   onRenameConversation,
   onDeleteConversation,
   onDeleteProject,
@@ -260,7 +262,6 @@ export function ConversationSidebar({
   const workspaceLinks = [
     { to: '/', label: '智能助手', icon: Sparkles, active: location.pathname === '/' },
     { to: '/files', label: '我的文件', icon: Folder, active: location.pathname.startsWith('/files') },
-    { to: 'https://github.com/fuzhengwei/WaLiOffice', label: '开源项目', icon: Github, active: false, external: true },
   ]
 
   const toggleProject = (id: string) => {
@@ -477,10 +478,10 @@ export function ConversationSidebar({
       <div className="border-b border-black/[0.04] bg-[#fbf8f1]/68 px-5 pb-5 pt-6 shadow-[0_1px_0_rgba(255,255,255,0.75)_inset]">
         <div className="mb-5 flex items-center gap-3">
           <div className="flex h-10 w-10 items-center justify-center overflow-hidden rounded-2xl bg-white text-surface-900 shadow-sm ring-1 ring-black/[0.06]">
-            <img src={LOGO_URL} alt="WaLiOffice logo" className="h-full w-full object-cover" />
+            <img src={LOGO_URL} alt="WaKuOffice logo" className="h-full w-full object-cover" />
           </div>
           <div className="min-w-0 flex-1">
-            <div className="truncate text-base font-black tracking-tight text-surface-950">WaLiOffice</div>
+            <div className="truncate text-base font-black tracking-tight text-surface-950">WaKuOffice</div>
             <div className="mt-0.5 truncate text-[11px] font-semibold text-surface-400">办公创作空间</div>
           </div>
           {/* 移动端关闭按钮 */}
@@ -566,7 +567,20 @@ export function ConversationSidebar({
 
         <div className="mb-3 flex items-center justify-between px-1">
           <span className="text-[10px] font-black uppercase tracking-[0.18em] text-surface-400">项目空间</span>
-          <span className="rounded-full bg-white/75 px-2 py-0.5 text-[10px] font-bold text-surface-500">{filteredProjects.length}</span>
+          <div className="flex items-center gap-1.5">
+            <span className="rounded-full bg-white/75 px-2 py-0.5 text-[10px] font-bold text-surface-500">{filteredProjects.length}</span>
+            {onNewProject && (
+              <button
+                type="button"
+                onClick={onNewProject}
+                className="flex h-6 w-6 items-center justify-center rounded-full bg-white/80 text-surface-500 shadow-sm ring-1 ring-black/[0.05] transition hover:bg-surface-950 hover:text-white"
+                title="新建项目"
+                aria-label="新建项目"
+              >
+                <Plus className="h-3.5 w-3.5" />
+              </button>
+            )}
+          </div>
         </div>
 
         <div className="space-y-2">

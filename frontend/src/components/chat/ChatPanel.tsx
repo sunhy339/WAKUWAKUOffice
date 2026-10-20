@@ -695,19 +695,14 @@ export function ChatPanel({
           {showProcessPanel && (
             <div className="w-full overflow-hidden rounded-2xl border border-black/[0.06] bg-white/60 shadow-[0_12px_40px_rgba(24,24,27,0.06)] backdrop-blur-xl">
               {/* 阶段指示器 — 紧凑横向 */}
-              <div
-                role="button"
-                tabIndex={isStreaming ? -1 : 0}
-                onClick={() => !isStreaming && setProcessPanelExpanded((expanded) => !expanded)}
-                onKeyDown={(event) => {
-                  if (!isStreaming && (event.key === 'Enter' || event.key === ' ')) {
-                    event.preventDefault()
-                    setProcessPanelExpanded((expanded) => !expanded)
-                  }
-                }}
-                className="flex w-full items-center gap-1 border-b border-black/[0.04] px-3 py-2 text-left transition-colors hover:bg-white/45"
-                aria-expanded={processPanelExpanded}
-              >
+              <div className="flex w-full items-center gap-1 border-b border-black/[0.04] px-3 py-2 text-left">
+                <button
+                  type="button"
+                  onClick={() => !isStreaming && setProcessPanelExpanded((expanded) => !expanded)}
+                  disabled={isStreaming}
+                  className="flex min-w-0 flex-1 items-center gap-1 text-left transition-colors hover:bg-white/45 disabled:cursor-default disabled:hover:bg-transparent"
+                  aria-expanded={processPanelExpanded}
+                >
                 {phaseConfig.map((phase, idx) => {
                   const PhaseIcon = phase.icon
                   const active = idx === currentPhaseIndex && isStreaming
@@ -731,22 +726,20 @@ export function ChatPanel({
                 <div className="ml-auto flex min-w-0 items-center gap-1.5 text-[11px] text-surface-400">
                   {isStreaming ? <Loader2 className="h-3 w-3 shrink-0 animate-spin" /> : streamPhase === 'error' ? <AlertCircle className="h-3 w-3 shrink-0 text-red-500" /> : <Check className="h-3 w-3 shrink-0 text-emerald-600" />}
                   <span className="max-w-[260px] truncate">{streamStatus}</span>
-                  {!isStreaming && streamPhase === 'error' && (
-                    <button
-                      type="button"
-                      onClick={(event) => {
-                        event.stopPropagation()
-                        onRetry()
-                      }}
-                      className="inline-flex shrink-0 items-center gap-1 rounded-full bg-white px-2 py-1 text-[10px] font-semibold text-surface-700 ring-1 ring-black/[0.06] transition hover:bg-surface-50 hover:text-surface-950"
-                      title="使用相同参数重新执行"
-                    >
-                      <RotateCcw className="h-3 w-3" />
-                      重试
-                    </button>
-                  )}
                   {!isStreaming && <ChevronDown className={`h-3 w-3 shrink-0 transition-transform ${processPanelExpanded ? 'rotate-180' : ''}`} />}
-                </div>
+                  </div>
+                </button>
+                {!isStreaming && streamPhase === 'error' && (
+                  <button
+                    type="button"
+                    onClick={onRetry}
+                    className="inline-flex shrink-0 items-center gap-1 rounded-full bg-white px-2 py-1 text-[10px] font-semibold text-surface-700 ring-1 ring-black/[0.06] transition hover:bg-surface-50 hover:text-surface-950"
+                    title="使用相同参数重新执行"
+                  >
+                    <RotateCcw className="h-3 w-3" />
+                    重试
+                  </button>
+                )}
               </div>
 
               {/* 执行步骤日志 — 逐行流式 */}

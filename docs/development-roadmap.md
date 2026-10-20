@@ -3,10 +3,19 @@
 ## 1. 基本信息
 
 - 当前开发分支：`feature/auth-recovery`
-- 基线分支：`main`
-- 当前基线提交：`50ad355abf9f77259fd68ec07d143cbaeaa0c6c4`
+- 集成开发分支：`develop`
+- 稳定基线分支：`main`
+- `develop` 当前基线提交：`50ad355abf9f77259fd68ec07d143cbaeaa0c6c4`
 - 开发规范：[universal-software-development-standard.md](./universal-software-development-standard.md)
 - 当前原则：保留现有功能，采用小步迭代；每个功能完成后先进入“待验收”，经用户确认后才标记为“已完成”。
+
+### Git 分支约定
+
+1. `main` 只保留稳定基线和正式发布版本，不直接进行功能开发。
+2. 新功能从 `develop` 创建 `feature/<功能名>` 分支；修复也必须在独立功能分支完成。
+3. 功能分支完成自测、部署验证并交给用户验收后，才允许合并到 `develop`。
+4. 用户未明确验收通过时，功能分支保持独立，不能通过“看起来可用”推断已完成。
+5. 合并前必须确认工作区干净、变更范围明确，并保留可回滚的提交记录。
 
 ## 2. 状态定义
 

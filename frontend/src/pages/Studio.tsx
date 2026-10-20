@@ -59,7 +59,9 @@ function buildRestoredMessages(session: PersistedSession) {
 }
 
 function buildHistoryProcessLogs(session: PersistedSession) {
-  const logs: string[] = [`已恢复会话：${session.title || session.id}`]
+  // 会话标题通常来自用户的完整首条提示词。恢复状态只需要说明动作结果，
+  // 不能把整段提示词再次放进过程日志，否则历史消息会在对话区重复显示。
+  const logs: string[] = ['已恢复历史会话']
 
   for (const msg of session.messages || []) {
     if (msg.role === 'assistant' && Array.isArray(msg.tool_calls)) {

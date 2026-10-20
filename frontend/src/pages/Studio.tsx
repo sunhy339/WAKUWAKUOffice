@@ -1432,6 +1432,9 @@ export default function Studio() {
 
     const token = useAuthStore.getState().token
     if (!token) {
+      if (requestTabId && requestOwnerRef.current[requestTabId] === requestId) {
+        delete requestOwnerRef.current[requestTabId]
+      }
       setAttachments(pendingAttachments)
       setStreaming(false)
       setStreamPhase('error')

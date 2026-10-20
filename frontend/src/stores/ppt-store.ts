@@ -159,6 +159,8 @@ export const usePPTStore = create<PPTState>((set, get) => ({
 
   closeTab: (tabId) => {
     set((state) => {
+      if (!state.tabs[tabId]) return state;
+
       const newTabs = { ...state.tabs };
       delete newTabs[tabId];
       const remainingIds = Object.keys(newTabs);
@@ -177,9 +179,24 @@ export const usePPTStore = create<PPTState>((set, get) => ({
           activeArtifactId: null,
         };
       }
-      // 切换到最后一个 tab
+
+      // 关闭后台 Tab 不能改变当前正在查看的会话。
+      // 只有关闭当前 Tab，或者当前 Tab 已经不存在时，才选择下一个 Tab；
+      // 否则关闭左侧/顶部的非当前任务会让主对话意外跳走。
+      if (state.activeTabId && state.activeTabId !== tabId && newTabs[state.activeTabId]) {
+        return { tabs: newTabs };
+      }
+
       const nextActive = remainingIds[remainingIds.length - 1];
-      return { activeTabId: nextActive, tabs: { ...newTabs, [nextActive]: { ...newTabs[nextActive], lastActiveAt: Date.now() } }, ...syncFromTab({ ...state, tabs: { ...newTabs, [nextActive]: { ...newTabs[nextActive], lastActiveAt: Date.now() } } }, nextActive) };
+      const nextTabs = {
+        ...newTabs,
+        [nextActive]: { ...newTabs[nextActive], lastActiveAt: Date.now() },
+      };
+      return {
+        activeTabId: nextActive,
+        tabs: nextTabs,
+        ...syncFromTab({ ...state, tabs: nextTabs }, nextActive),
+      };
     });
   },
 

@@ -1042,6 +1042,12 @@ async fn chat_stream(
         max_turns: 10,
         system_prompt,
         allowed_tools,
+        finish_after_artifact: resolved_tool_kind.as_deref() == Some("image")
+            && req
+                .target
+                .as_ref()
+                .map(|target| target.operation != "edit_slide")
+                .unwrap_or(true),
     };
 
     // 创建 tool context 的 emit 回调

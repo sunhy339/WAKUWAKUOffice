@@ -56,6 +56,9 @@ pub struct AgentConfig {
     pub max_turns: usize,
     pub system_prompt: String,
     pub allowed_tools: Option<Vec<String>>,
+    /// 图片专用请求中，image_prompt 已经返回完整的多风格产物后直接收尾。
+    /// 该工具本身一次会生成多个变体，继续让模型追问同一个工具会造成重复出图。
+    pub finish_after_artifact: bool,
 }
 
 impl Default for AgentConfig {
@@ -64,6 +67,7 @@ impl Default for AgentConfig {
             max_turns: 8,
             system_prompt: DEFAULT_SYSTEM_PROMPT.to_string(),
             allowed_tools: None,
+            finish_after_artifact: false,
         }
     }
 }
@@ -409,6 +413,7 @@ pub async fn run_agent_loop(
                 });
 
                 // 收集 Artifact
+                let artifact_count_before = all_artifacts.len();
                 if result.success {
                     if let Some(artifact_updates) = &result.artifact_updates {
                         for artifact in artifact_updates {
@@ -438,6 +443,34 @@ pub async fn run_agent_loop(
                             let _ = tx.send(AgentEvent::Artifact { artifact }).await;
                         }
                     }
+                }
+
+                // image_prompt 一次已经返回 3 个风格变体。图片专用请求不再把
+                // 同一个工具结果交给模型继续追问，避免重复发起第二轮长耗时生图。
+                if config.finish_after_artifact
+                    && tool_name == "image_prompt"
+                    && all_artifacts.len() > artifact_count_before
+                {
+                    let summary = if result.observation.is_empty() {
+                        format!(
+                            "图片已生成，共 {} 个结果，请查看右侧成果区。",
+                            all_artifacts.len()
+                        )
+                    } else {
+                        result.observation.clone()
+                    };
+                    let _ = tx
+                        .send(AgentEvent::Message {
+                            content: summary.clone(),
+                        })
+                        .await;
+                    let _ = tx
+                        .send(AgentEvent::Done {
+                            summary,
+                            artifacts: all_artifacts,
+                        })
+                        .await;
+                    return;
                 }
             }
 

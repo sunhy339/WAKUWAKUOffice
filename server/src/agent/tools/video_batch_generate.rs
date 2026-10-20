@@ -174,12 +174,13 @@ impl OfficeTool for VideoBatchGenerateTool {
         );
 
         // ---- Agnes 凭证 ----
-        let media_route = match resolve_video_route(&ctx.user_id).await {
-            Ok(route) => route,
-            Err(err) => {
-                return ToolResult::err(format!("Agnes 凭证不可用：{err}"));
-            }
-        };
+        let media_route =
+            match resolve_video_route(&ctx.user_id, ctx.preferred_model.as_deref()).await {
+                Ok(route) => route,
+                Err(err) => {
+                    return ToolResult::err(format!("Agnes 凭证不可用：{err}"));
+                }
+            };
 
         let credentials = media_route.credentials;
         let video_model = media_route.model;

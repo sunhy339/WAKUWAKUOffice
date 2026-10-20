@@ -8,7 +8,10 @@ use crate::agent::tool::{OfficeTool, ToolArtifact, ToolContext, ToolResult};
 use crate::llm::LlmClient;
 use crate::models::{ChatAttachment, ChatMessage};
 
-use super::agnes_media::{http_client, post_json_url, resolve_image_route, AgnesCredentials};
+use super::agnes_media::{
+    http_client, post_json_url, resolve_image_routes_with_preference, AgnesCredentials,
+    AgnesModelRoute,
+};
 use crate::llm::routing::ModelRequirement;
 
 pub struct ImagePromptTool;
@@ -150,6 +153,44 @@ async fn generate_agnes_image(
         }
     }
     Err(latest_error)
+}
+
+/// 在同一能力的模型候选中执行一次图片请求。
+///
+/// 模型候选由路由层筛选，媒体适配器只负责把模型名注入协议请求，并在
+/// 上游错误或响应缺少可预览内容时尝试下一个候选。返回实际成功的模型，
+/// 便于产物和状态信息保持可追溯。
+async fn generate_image_from_routes(
+    client: &reqwest::Client,
+    routes: &[AgnesModelRoute],
+    base_body: &serde_json::Value,
+) -> Result<(AgnesImageResponse, String), String> {
+    let mut errors = Vec::new();
+
+    for route in routes {
+        let mut body = base_body.clone();
+        body["model"] = json!(route.model);
+        let endpoint = route.credentials.endpoint("/v1/images/generations");
+
+        match generate_agnes_image(client, &endpoint, &route.credentials, &body).await {
+            Ok(response) => {
+                if response
+                    .data
+                    .iter()
+                    .any(|item| image_src_from_response(item).is_some())
+                {
+                    return Ok((response, route.model.clone()));
+                }
+                errors.push(format!(
+                    "模型 {} 返回成功但没有 url 或 b64_json",
+                    route.model
+                ));
+            }
+            Err(error) => errors.push(format!("模型 {}：{}", route.model, error)),
+        }
+    }
+
+    Err(errors.join("；"))
 }
 
 fn infer_scene_guide(topic: &str) -> &'static str {
@@ -306,7 +347,10 @@ impl OfficeTool for ImagePromptTool {
             )
         };
 
-        let planner = LlmClient::for_user(&ctx.user_id, ctx.preferred_model.as_deref()).await;
+        // 提示词规划是文本任务，不能沿用用户可能选中的纯生图模型；
+        // 真正的图片请求会在下方按 ImageGeneration/ImageEdit 单独路由。
+        let planner =
+            LlmClient::for_user_with_requirement(&ctx.user_id, None, ModelRequirement::Text).await;
         let plan_response = match planner
             .chat(
                 &[
@@ -346,13 +390,16 @@ impl OfficeTool for ImagePromptTool {
         } else {
             ModelRequirement::ImageGeneration
         };
-        let media_route = match resolve_image_route(&ctx.user_id, media_requirement).await {
-            Ok(route) => route,
+        let media_routes = match resolve_image_routes_with_preference(
+            &ctx.user_id,
+            ctx.preferred_model.as_deref(),
+            media_requirement,
+        )
+        .await
+        {
+            Ok(routes) => routes,
             Err(err) => return ToolResult::err(err.to_string()),
         };
-        let credentials = media_route.credentials;
-        let image_model = media_route.model;
-        let endpoint = credentials.endpoint("/v1/images/generations");
         let client = match http_client(Duration::from_secs(240)) {
             Ok(client) => client,
             Err(err) => return ToolResult::err(format!("初始化 Agnes 客户端失败: {err}")),
@@ -366,6 +413,7 @@ impl OfficeTool for ImagePromptTool {
         let mut generated_images = Vec::new();
         let mut generated_variants = Vec::new();
         let mut failed_variants = Vec::new();
+        let mut used_models = Vec::new();
 
         for (index, variant) in variants.iter().enumerate() {
             ctx.send(
@@ -380,7 +428,6 @@ impl OfficeTool for ImagePromptTool {
 
             let request_body = if wants_image_to_image {
                 json!({
-                    "model": image_model.as_str(),
                     "prompt": variant.prompt,
                     "size": output_spec.size,
                     "ratio": output_spec.ratio,
@@ -391,7 +438,6 @@ impl OfficeTool for ImagePromptTool {
                 })
             } else {
                 json!({
-                    "model": image_model.as_str(),
                     "prompt": variant.prompt,
                     "size": output_spec.size,
                     "ratio": output_spec.ratio,
@@ -401,9 +447,9 @@ impl OfficeTool for ImagePromptTool {
                 })
             };
 
-            let response =
-                match generate_agnes_image(&client, &endpoint, &credentials, &request_body).await {
-                    Ok(response) => response,
+            let (response, used_model) =
+                match generate_image_from_routes(&client, &media_routes, &request_body).await {
+                    Ok(result) => result,
                     Err(err) => {
                         let detail = format!(
                             "第 {} 张图片生成失败（{}）：{}",
@@ -429,9 +475,13 @@ impl OfficeTool for ImagePromptTool {
             let image_src = image.as_ref().and_then(image_src_from_response);
             if let Some(src) = image_src {
                 generated_images.push(src.clone());
+                if !used_models.iter().any(|model| model == &used_model) {
+                    used_models.push(used_model.clone());
+                }
                 generated_variants.push(json!({
                     "style": variant.style,
                     "prompt": variant.prompt,
+                    "model": used_model,
                     "url": src,
                     "revised_prompt": image.and_then(|item| item.revised_prompt),
                 }));
@@ -458,7 +508,6 @@ impl OfficeTool for ImagePromptTool {
             );
             let fallback_body = if wants_image_to_image {
                 json!({
-                    "model": image_model.as_str(),
                     "prompt": fallback_prompt,
                     "size": output_spec.size,
                     "ratio": output_spec.ratio,
@@ -469,7 +518,6 @@ impl OfficeTool for ImagePromptTool {
                 })
             } else {
                 json!({
-                    "model": image_model.as_str(),
                     "prompt": fallback_prompt,
                     "size": "1K",
                     "ratio": "1:1",
@@ -478,14 +526,18 @@ impl OfficeTool for ImagePromptTool {
                     }
                 })
             };
-            match generate_agnes_image(&client, &endpoint, &credentials, &fallback_body).await {
-                Ok(response) => {
+            match generate_image_from_routes(&client, &media_routes, &fallback_body).await {
+                Ok((response, used_model)) => {
                     if let Some(image) = response.data.into_iter().next() {
                         if let Some(src) = image_src_from_response(&image) {
                             generated_images.push(src.clone());
+                            if !used_models.iter().any(|model| model == &used_model) {
+                                used_models.push(used_model.clone());
+                            }
                             generated_variants.push(json!({
                                 "style": "兜底生成",
                                 "prompt": fallback_prompt,
+                                "model": used_model,
                                 "url": src,
                                 "revised_prompt": image.revised_prompt,
                             }));
@@ -536,9 +588,85 @@ impl OfficeTool for ImagePromptTool {
                     "images": generated_images,
                     "variants": generated_variants,
                     "provider": "agnes",
-                    "model": image_model,
+                    "model": used_models.first().cloned().unwrap_or_default(),
+                    "models_used": used_models,
+                    "models_tried": media_routes
+                        .iter()
+                        .map(|route| route.model.clone())
+                        .collect::<Vec<_>>(),
                 }),
             }],
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{extract::State, routing::post, Json, Router};
+    use serde_json::Value;
+    use std::sync::{Arc, Mutex};
+
+    async fn image_route_mock(
+        State(requested_models): State<Arc<Mutex<Vec<String>>>>,
+        Json(body): Json<Value>,
+    ) -> Json<Value> {
+        let model = body
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        requested_models.lock().unwrap().push(model.clone());
+
+        if model == "primary-image" {
+            Json(json!({ "data": [] }))
+        } else {
+            Json(json!({ "data": [{ "b64_json": "ZmFrZS1pbWFnZQ==" }] }))
+        }
+    }
+
+    #[tokio::test]
+    async fn image_generation_falls_back_when_primary_returns_no_image() {
+        let requested_models = Arc::new(Mutex::new(Vec::new()));
+        let app = Router::new()
+            .route("/v1/images/generations", post(image_route_mock))
+            .with_state(requested_models.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let credentials = AgnesCredentials {
+            base_url: format!("http://{address}"),
+            api_keys: vec!["test-key".into()],
+        };
+        let routes = vec![
+            AgnesModelRoute {
+                credentials: credentials.clone(),
+                model: "primary-image".into(),
+                profile_id: None,
+            },
+            AgnesModelRoute {
+                credentials,
+                model: "backup-image".into(),
+                profile_id: None,
+            },
+        ];
+
+        let result = generate_image_from_routes(
+            &http_client(Duration::from_secs(5)).unwrap(),
+            &routes,
+            &json!({ "prompt": "test" }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.1, "backup-image");
+        assert_eq!(
+            requested_models.lock().unwrap().as_slice(),
+            ["primary-image", "backup-image"]
+        );
+        server.abort();
     }
 }

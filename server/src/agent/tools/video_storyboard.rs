@@ -297,7 +297,13 @@ impl OfficeTool for VideoStoryboardTool {
             "视频需求：{topic}\n宽高比：{aspect_ratio}\n最大镜头数：{max_shots}\n每镜头时长：{seconds_per_shot} 秒\n参考图片：{image_guidance}\n音频参考：{audio_guidance}\n视频参考：{video_guidance}\n\n参考文档内容：\n{reference_text}\n\n请规划完整的分镜方案。每个镜头要有独立的创意方向，组合起来构成完整叙事。如果提供了参考文档内容，请基于其中的核心信息设计镜头文案。相邻镜头要注意视觉连续性（角色一致、色调一致、场景过渡自然）。",
         );
 
-        let planner = LlmClient::for_user(&ctx.user_id, ctx.preferred_model.as_deref()).await;
+        // 分镜脚本是文本任务，和后续视频生成模型分开路由。
+        let planner = LlmClient::for_user_with_requirement(
+            &ctx.user_id,
+            None,
+            crate::llm::ModelRequirement::Text,
+        )
+        .await;
         let plan = match planner
             .chat(
                 &[

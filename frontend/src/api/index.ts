@@ -1,6 +1,6 @@
 import axios from 'axios';
 import { useAuthStore } from '@/stores/auth-store';
-import { normalizeChatSseEvent, parseSseData } from '@/lib/chat-events';
+import { getChatSseEventKey, isTerminalChatSseEvent, normalizeChatSseEvent, parseSseData } from '@/lib/chat-events';
 import type { TokenResponse, ToolKind, Artifact, PersistedSession, AppSettings, MCPServiceConfig, ChatAttachment, ChatSSEEvent, ChatTargetContext } from '@/types';
 
 const API_BASE = '/api';
@@ -220,12 +220,14 @@ export const chatApi = {
     const reader = response.body?.getReader();
     const decoder = new TextDecoder();
 
-    if (!reader) return;
+    if (!reader) throw new Error('聊天连接不可用，请重试');
 
     let buffer = '';
     let currentEvent = 'message';
     let currentData: string[] = [];
     let sequence = 0;
+    let terminalEvent: ChatSSEEvent | null = null;
+    const seenEventKeys = new Set<string>();
 
     const dispatchFrame = () => {
       if (currentData.length === 0) {
@@ -238,7 +240,12 @@ export const chatApi = {
         parseSseData(currentData.join('\n')),
         ++sequence,
       );
-      onEvent(event);
+      const eventKey = getChatSseEventKey(event);
+      if (!seenEventKeys.has(eventKey)) {
+        seenEventKeys.add(eventKey);
+        onEvent(event);
+        if (isTerminalChatSseEvent(event)) terminalEvent = event;
+      }
       currentEvent = 'message';
       currentData = [];
     };
@@ -281,6 +288,10 @@ export const chatApi = {
       dispatchFrame();
     } finally {
       reader.releaseLock();
+    }
+
+    if (!terminalEvent) {
+      throw new Error('聊天连接已中断，未收到完成信号，请重试');
     }
   },
 };

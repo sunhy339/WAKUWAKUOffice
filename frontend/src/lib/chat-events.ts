@@ -41,3 +41,23 @@ export function isTerminalChatSseEvent(event: ChatSSEEvent): boolean {
   return event.event === 'done' || event.event === 'error'
 }
 
+/**
+ * 用事件名和负载生成本次连接内的去重键。
+ *
+ * 服务端重试或代理重放 SSE 时，可能重复发送同一条业务事件；保留
+ * 事件顺序字段用于观测，但不要让重复事件再次驱动页面状态或日志。
+ */
+export function getChatSseEventKey(event: ChatSSEEvent): string {
+  let payload = ''
+  if (typeof event.data === 'string') {
+    payload = event.data
+  } else {
+    try {
+      payload = JSON.stringify(event.data)
+    } catch {
+      payload = String(event.data)
+    }
+  }
+  return `${event.event}:${payload}`
+}
+

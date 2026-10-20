@@ -739,7 +739,13 @@ impl OfficeTool for VideoGenerateTool {
             image_inputs.len(), audio_inputs.len(), video_refs.len()
         );
 
-        let planner = LlmClient::for_user(&ctx.user_id, ctx.preferred_model.as_deref()).await;
+        // 视频脚本规划使用文本模型；视频模型只负责后续媒体生成请求。
+        let planner = LlmClient::for_user_with_requirement(
+            &ctx.user_id,
+            None,
+            crate::llm::ModelRequirement::Text,
+        )
+        .await;
         let mut plan = match planner
             .chat(
                 &[
@@ -804,24 +810,25 @@ impl OfficeTool for VideoGenerateTool {
         let num_frames = (plan.seconds as u32) * frame_rate;
 
         // ---- Agnes 凭证 ----
-        let media_route = match resolve_video_route(&ctx.user_id).await {
-            Ok(route) => route,
-            Err(err) => {
-                return local_video_artifact(
-                    ctx,
-                    topic,
-                    &plan,
-                    width,
-                    height,
-                    frame_rate,
-                    num_frames,
-                    generation_mode,
-                    image_inputs.len(),
-                    format!("Agnes 凭证不可用：{err}"),
-                )
-                .await;
-            }
-        };
+        let media_route =
+            match resolve_video_route(&ctx.user_id, ctx.preferred_model.as_deref()).await {
+                Ok(route) => route,
+                Err(err) => {
+                    return local_video_artifact(
+                        ctx,
+                        topic,
+                        &plan,
+                        width,
+                        height,
+                        frame_rate,
+                        num_frames,
+                        generation_mode,
+                        image_inputs.len(),
+                        format!("Agnes 凭证不可用：{err}"),
+                    )
+                    .await;
+                }
+            };
         let credentials = media_route.credentials;
         let video_model = media_route.model;
         let client = match http_client(Duration::from_secs(90)) {

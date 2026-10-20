@@ -13,6 +13,7 @@ import { SettingsDialog } from '@/components/settings/SettingsDialog'
 import { AlertCircle, CheckCircle2, Info, Play, X, PanelRightClose, PanelRight, Files, Menu, Settings2 } from 'lucide-react'
 import type { AppSettings, Artifact, ChatAttachment, ChatTargetContext, ChatStreamPhase, ConversationRecord, InputRef, LLMProfile, PersistedSession, ProjectMeta, ToolKind, ToolConfigMap } from '@/types'
 import { extractArtifactSummary } from '@/lib/artifact-summary'
+import { chatModelsFromProfiles, supportsChatModel } from '@/lib/model-capabilities'
 const LOGO_URL = '/logo.png'
 
 type ToastTone = 'success' | 'error' | 'info'
@@ -122,12 +123,8 @@ function playConversationDoneSound() {
   }
 }
 
-function isMediaOnlyModel(model?: string) {
-  return /^(agnes|gpt)-(image|video)-/i.test(model || '') || /^(image|video)-/i.test(model || '')
-}
-
 function pickChatModel(models: string[], fallback = '') {
-  return models.find((model) => !isMediaOnlyModel(model)) || fallback
+  return models[0] || fallback
 }
 
 function loadImageElement(src: string) {
@@ -213,6 +210,9 @@ export default function Studio() {
   const autoSavedArtifactIdsRef = useRef<Set<string>>(new Set())
   const attachmentInputRef = useRef<HTMLInputElement>(null)
   const toastTimerRef = useRef<number | null>(null)
+  // 历史会话详情是异步请求；用序号丢弃较早的响应，避免快速点击 A → B
+  // 时，A 的慢响应又把主对话覆盖回去。
+  const conversationLoadRef = useRef(0)
 
   const showToast = (message: string, tone: ToastTone = 'info') => {
     setToast({ message, tone })
@@ -243,8 +243,9 @@ export default function Studio() {
       const activeProfiles = profiles.filter((profile) => profile.id === s.active_profile_id)
       const visibleProfiles = activeProfiles.length > 0 ? activeProfiles : profiles
       setModelProfiles(visibleProfiles)
-      const chatModels = Array.from(new Set(visibleProfiles.flatMap((profile) => profile.models || []))).filter((model) => !isMediaOnlyModel(model))
-      if (s.active_model && !isMediaOnlyModel(s.active_model)) setSelectedModel(s.active_model)
+      const chatModels = chatModelsFromProfiles(visibleProfiles)
+      const activeProfile = visibleProfiles.find((profile) => profile.id === s.active_profile_id)
+      if (activeProfile && s.active_model && supportsChatModel(activeProfile, s.active_model)) setSelectedModel(s.active_model)
       else setSelectedModel(pickChatModel(chatModels, selectedModel))
       if (s.basic?.default_theme) setSelectedTheme(s.basic.default_theme)
     } catch (err) {
@@ -609,6 +610,8 @@ export default function Studio() {
   }
 
   const handleNewConversation = () => {
+    // 让尚未完成的历史会话加载失效，避免新建对话被旧响应覆盖。
+    conversationLoadRef.current += 1
     // 如果正在 streaming，先中止当前请求再切换
     if (isStreaming) {
       abortRef.current?.abort()
@@ -638,6 +641,9 @@ export default function Studio() {
   }
 
   const handleSelectConversation = async (id: string) => {
+    const loadId = ++conversationLoadRef.current
+    const isLatestLoad = () => conversationLoadRef.current === loadId
+
     // 如果正在 streaming，先中止当前请求再切换
     if (isStreaming) {
       abortRef.current?.abort()
@@ -649,59 +655,98 @@ export default function Studio() {
     setActiveView('chat')
     try {
       const res = await sessionApi.getSession(id)
+      if (!isLatestLoad()) return
+
       const session = res.data as PersistedSession
       const tool = session.tool_kind || 'general'
-      setActiveTool(tool)
-      setSessionId(session.id)
-      if (session.project_id) {
-        setActiveProjectId(session.project_id)
-      }
-      usePPTStore.setState({
-        messages: buildRestoredMessages(session),
-        artifacts: session.artifacts || [],
-        activeArtifactId: session.artifacts?.[0]?.id || null,
-        isGenerating: false,
-        isStreaming: false,
-      })
+
+      let restoredProject: typeof project = null
+      let restoredSlides = [] as typeof slides
       // project_id 可能是通用项目 ID 也可能是 PPT 项目 ID
       if (session.project_id) {
         try {
           // 先尝试通用项目 API
           await projectApi.getProject(session.project_id)
-          setActiveProjectId(session.project_id)
-          usePPTStore.setState({ project: null, slides: [], currentSlideIndex: 0 })
         } catch {
           // 可能是 PPT 项目 ID（老数据兼容）
           try {
             const pptRes = await pptApi.getProject(session.project_id)
-            setProject(pptRes.data)
-            setSlides(pptRes.data.slides || [])
-            setCurrentSlide(0)
+            restoredProject = pptRes.data
+            restoredSlides = pptRes.data.slides || []
           } catch {
-            usePPTStore.setState({ project: null, slides: [], currentSlideIndex: 0 })
+            // 历史数据可能引用已删除的项目；仍然恢复会话本身。
           }
         }
-      } else {
-        usePPTStore.setState({ project: null, slides: [], currentSlideIndex: 0 })
       }
+
+      if (!isLatestLoad()) return
+
+      const restoredMessages = buildRestoredMessages(session)
+      const restoredArtifacts = session.artifacts || []
+      const restoredProcessLogs = buildHistoryProcessLogs(session)
+      const restoredTabId = usePPTStore.getState().activeTabId
+
+      // 必须通过 store 的 tab-aware 入口写入。此前直接 setState 只更新了
+      // 顶层 messages/artifacts，当前 tab 仍保留旧内容；下一次切 tab 时
+      // syncFromTab 会把旧内容重新覆盖回来，表现为“历史会话不对”。
+      restoreState({
+        project: restoredProject,
+        slides: restoredSlides,
+        currentSlideIndex: 0,
+        messages: restoredMessages,
+        artifacts: restoredArtifacts,
+        activeArtifactId: restoredArtifacts[0]?.id || null,
+        isGenerating: false,
+        isStreaming: false,
+        sessionId: session.id,
+        activeTool: tool,
+        activeProjectId: session.project_id || null,
+        tabTitle: session.title?.slice(0, 24) || '历史会话',
+        streamPhase: 'done',
+        streamStatus: '已恢复历史会话',
+        processLogs: restoredProcessLogs,
+        input: '',
+        attachments: [],
+        inputRefs: [],
+      })
+
+      setActiveTool(tool)
+      setActiveProjectId(session.project_id || null)
+      setInput('')
+      setAttachments([])
+      setInputRefs([])
       setShowArtifactPanel((session.artifacts?.length || 0) > 0 || tool !== 'general')
       setFollowLatestSlide(false)
       setPptProgress(null)
       setStreamPhase('done')
       setStreamStatus('已恢复历史会话')
-      setProcessLogs(buildHistoryProcessLogs(session))
-      // 更新当前 tab 元信息
-      if (activeTabId) {
-        updateTab(activeTabId, {
-          tabTitle: session.title?.slice(0, 24) || '历史会话',
-          sessionId: session.id,
-          activeTool: tool,
-          activeProjectId: session.project_id || null,
-          streamPhase: 'done',
-          streamStatus: '已恢复历史会话',
-        })
+      setProcessLogs(restoredProcessLogs)
+
+      // tabUiState 也要同步，否则离开再返回当前 tab 时会把旧草稿和旧状态
+      // 恢复到刚加载的历史会话上。
+      if (restoredTabId) {
+        setTabUiState((prev) => ({
+          ...prev,
+          [restoredTabId]: {
+            ...(prev[restoredTabId] || {}),
+            input: '',
+            attachments: [],
+            inputRefs: [],
+            streamStatus: '已恢复历史会话',
+            streamPhase: 'done',
+            processLogs: restoredProcessLogs,
+            activeTool: tool,
+            activeProjectId: session.project_id || null,
+            toolConfig: prev[restoredTabId]?.toolConfig || {},
+            showArtifactPanel: (session.artifacts?.length || 0) > 0 || tool !== 'general',
+            pptProgress: null,
+            followLatestSlide: false,
+          },
+        }))
       }
     } catch (err) {
+      // 旧会话请求失败时也不能覆盖后来已选中的会话状态或弹出误报。
+      if (!isLatestLoad()) return
       console.error('Select conversation error:', err)
       const errMsg = err instanceof Error ? err.message : '未知错误'
       showToast(`恢复历史会话失败：${errMsg}`, 'error')
@@ -777,8 +822,9 @@ export default function Studio() {
       const activeProfiles = profiles.filter((profile) => profile.id === saved.active_profile_id)
       const visibleProfiles = activeProfiles.length > 0 ? activeProfiles : profiles
       setModelProfiles(visibleProfiles)
-      const chatModels = Array.from(new Set(visibleProfiles.flatMap((profile) => profile.models || []))).filter((model) => !isMediaOnlyModel(model))
-      if (saved.active_model && !isMediaOnlyModel(saved.active_model)) setSelectedModel(saved.active_model)
+      const chatModels = chatModelsFromProfiles(visibleProfiles)
+      const activeProfile = visibleProfiles.find((profile) => profile.id === saved.active_profile_id)
+      if (activeProfile && saved.active_model && supportsChatModel(activeProfile, saved.active_model)) setSelectedModel(saved.active_model)
       else setSelectedModel(pickChatModel(chatModels, selectedModel))
       if (saved.basic?.default_theme) setSelectedTheme(saved.basic.default_theme)
       setActiveView('chat')
@@ -1167,6 +1213,8 @@ export default function Studio() {
       : baseMessage
     const pendingAttachments = draftAttachments
     const inferredTool = target?.operation === 'edit_slide' ? 'ppt' : inferToolFromMessage(message, pendingAttachments)
+    const requestLoadId = conversationLoadRef.current
+    const isCurrentRequest = () => conversationLoadRef.current === requestLoadId
     if (inferredTool !== activeTool) setActiveTool(inferredTool)
     if (!isDirectAction) {
       setInput('')
@@ -1239,6 +1287,9 @@ export default function Studio() {
         selectedModel,
         pendingAttachments,
         (sseEvent) => {
+          // 选择历史会话后，旧请求即使还有少量缓冲事件到达，也不能
+          // 再写入当前主页面或覆盖刚恢复的会话。
+          if (!isCurrentRequest()) return
           const { event, data } = sseEvent
           switch (event) {
             case 'message':
@@ -1277,6 +1328,7 @@ export default function Studio() {
               }
               if (data.project_id && !project) {
                 pptApi.getProject(data.project_id).then(({ data: proj }) => {
+                  if (!isCurrentRequest()) return
                   setProject(proj)
                   setSlides(proj.slides || [])
                 })
@@ -1410,6 +1462,7 @@ export default function Studio() {
                 }
               } else if (data.project_id && !project) {
                 pptApi.getProject(data.project_id).then(({ data: proj }) => {
+                  if (!isCurrentRequest()) return
                   setProject(proj)
                   setSlides(proj.slides || [])
                 })
@@ -1447,6 +1500,7 @@ export default function Studio() {
         target
       )
     } catch (err) {
+      if (!isCurrentRequest()) return
       console.error('Chat error:', err)
       const aborted = err instanceof DOMException && err.name === 'AbortError'
       const errorMessage = err instanceof Error ? err.message : '发生了未知错误'
@@ -1476,6 +1530,10 @@ export default function Studio() {
         return { messages: msgs }
       })
     } finally {
+      if (!isCurrentRequest()) {
+        if (abortRef.current === abortController) abortRef.current = null
+        return
+      }
       setStreaming(false)
       abortRef.current = null
       refreshConversations()

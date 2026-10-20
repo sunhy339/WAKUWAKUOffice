@@ -1,4 +1,4 @@
-use crate::llm::routing::{select_model, ModelRequirement};
+use crate::llm::routing::{select_models, ModelRequirement};
 use anyhow::{anyhow, Result};
 use reqwest::Client;
 use serde::de::DeserializeOwned;
@@ -110,8 +110,34 @@ pub async fn resolve_image_route(
     user_id: &str,
     requirement: ModelRequirement,
 ) -> Result<AgnesModelRoute> {
-    if let Some(route) = resolve_user_media_route(user_id, requirement, "图片").await? {
-        return Ok(route);
+    resolve_image_routes_with_preference(user_id, None, requirement)
+        .await?
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow!("未配置图片模型"))
+}
+
+/// 返回按优先级排列的图片模型候选。
+///
+/// 用户显式配置优先于服务端环境变量；同一能力下的后续模型只在前一个
+/// 模型返回可重试错误或协议无效时使用，避免把普通文本模型误当成图片模型。
+pub async fn resolve_image_routes(
+    user_id: &str,
+    requirement: ModelRequirement,
+) -> Result<Vec<AgnesModelRoute>> {
+    resolve_image_routes_with_preference(user_id, None, requirement).await
+}
+
+/// 返回按用户显式选择、默认模型和优先级排列的图片模型候选。
+pub async fn resolve_image_routes_with_preference(
+    user_id: &str,
+    preferred_model: Option<&str>,
+    requirement: ModelRequirement,
+) -> Result<Vec<AgnesModelRoute>> {
+    if let Some(routes) =
+        resolve_user_media_routes(user_id, preferred_model, requirement, "图片").await?
+    {
+        return Ok(routes);
     }
 
     let config = crate::config::config();
@@ -121,22 +147,43 @@ pub async fn resolve_image_route(
         &config.llm_image_api_key,
         "图片",
     )?;
-    let model = config.llm_image_model.trim().to_string();
-    if model.is_empty() {
+    let models = if config.llm_image_models.is_empty() {
+        vec![config.llm_image_model.trim().to_string()]
+    } else {
+        config.llm_image_models.clone()
+    };
+    let models = order_configured_models(models, preferred_model);
+    let routes = models
+        .into_iter()
+        .map(|model| model.trim().to_string())
+        .filter(|model| !model.is_empty())
+        .map(|model| AgnesModelRoute {
+            credentials: credentials.clone(),
+            model,
+            profile_id: None,
+        })
+        .collect::<Vec<_>>();
+    if routes.is_empty() {
         return Err(anyhow!("未配置图片模型名"));
     }
-    Ok(AgnesModelRoute {
-        credentials,
-        model,
-        profile_id: None,
-    })
+    Ok(routes)
 }
 
-pub async fn resolve_video_route(user_id: &str) -> Result<AgnesModelRoute> {
-    if let Some(route) =
-        resolve_user_media_route(user_id, ModelRequirement::VideoGeneration, "视频").await?
+pub async fn resolve_video_route(
+    user_id: &str,
+    preferred_model: Option<&str>,
+) -> Result<AgnesModelRoute> {
+    if let Some(routes) = resolve_user_media_routes(
+        user_id,
+        preferred_model,
+        ModelRequirement::VideoGeneration,
+        "视频",
+    )
+    .await?
     {
-        return Ok(route);
+        if let Some(route) = routes.into_iter().next() {
+            return Ok(route);
+        }
     }
 
     let config = crate::config::config();
@@ -146,7 +193,15 @@ pub async fn resolve_video_route(user_id: &str) -> Result<AgnesModelRoute> {
         &config.llm_video_api_key,
         "视频",
     )?;
-    let model = config.llm_video_model.trim().to_string();
+    let models = if config.llm_video_models.is_empty() {
+        vec![config.llm_video_model.trim().to_string()]
+    } else {
+        config.llm_video_models.clone()
+    };
+    let model = order_configured_models(models, preferred_model)
+        .into_iter()
+        .next()
+        .unwrap_or_default();
     if model.is_empty() {
         return Err(anyhow!("未配置视频模型名"));
     }
@@ -157,11 +212,12 @@ pub async fn resolve_video_route(user_id: &str) -> Result<AgnesModelRoute> {
     })
 }
 
-async fn resolve_user_media_route(
+async fn resolve_user_media_routes(
     user_id: &str,
+    preferred_model: Option<&str>,
     requirement: ModelRequirement,
     kind: &str,
-) -> Result<Option<AgnesModelRoute>> {
+) -> Result<Option<Vec<AgnesModelRoute>>> {
     let pool = crate::state::db_pool();
     let settings = match crate::db::settings_repo::find_by_user(&pool, user_id).await {
         Ok(Some(settings)) => settings,
@@ -180,21 +236,42 @@ async fn resolve_user_media_route(
         return Ok(None);
     };
 
-    let Some(route) = select_model(profile, None, requirement) else {
+    let routes = select_models(profile, preferred_model, requirement);
+    if routes.is_empty() {
         tracing::warn!("用户未配置可用的 {kind} 模型，回退服务端媒体配置: user_id={user_id}");
         return Ok(None);
-    };
+    }
 
     let mut keys = profile.api_keys.clone();
     let fallback_key = profile.api_key.as_deref().unwrap_or_default();
     let credentials = credentials_from_config(&profile.base_url, &keys, fallback_key, kind)?;
     keys.clear();
 
-    Ok(Some(AgnesModelRoute {
-        credentials,
-        model: route.model,
-        profile_id: Some(route.profile_id),
-    }))
+    Ok(Some(
+        routes
+            .into_iter()
+            .map(|route| AgnesModelRoute {
+                credentials: credentials.clone(),
+                model: route.model,
+                profile_id: Some(route.profile_id),
+            })
+            .collect(),
+    ))
+}
+
+fn order_configured_models(mut models: Vec<String>, preferred_model: Option<&str>) -> Vec<String> {
+    let Some(preferred) = preferred_model
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return models;
+    };
+    let Some(index) = models.iter().position(|model| model.trim() == preferred) else {
+        return models;
+    };
+    let preferred_model = models.remove(index);
+    models.insert(0, preferred_model);
+    models
 }
 
 fn credentials_from_config(

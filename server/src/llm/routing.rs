@@ -69,6 +69,21 @@ pub fn select_model(
     preferred_model: Option<&str>,
     requirement: ModelRequirement,
 ) -> Option<ModelRoute> {
+    select_models(profile, preferred_model, requirement)
+        .into_iter()
+        .next()
+}
+
+/// 按能力返回所有可用候选模型。
+///
+/// 候选顺序是稳定的：显式选择的模型优先，其次是配置默认模型，最后按
+/// priority（数值越小越优先）和模型名排序。调用方可以在上游返回可重试
+/// 错误或响应不符合协议时尝试下一个模型，而不需要复制能力筛选规则。
+pub fn select_models(
+    profile: &LlmProfileConfig,
+    preferred_model: Option<&str>,
+    requirement: ModelRequirement,
+) -> Vec<ModelRoute> {
     let configs = effective_model_configs(profile);
     let capability = requirement.capability();
 
@@ -79,34 +94,47 @@ pub fn select_model(
             && !is_media_model_for_text(config.model.as_str(), requirement)
     };
 
-    if let Some(preferred) = preferred_model
-        .map(str::trim)
-        .filter(|item| !item.is_empty())
-    {
-        if let Some(config) = configs
+    let mut selected = Vec::new();
+    let mut append_if_eligible = |model: Option<&str>| {
+        let Some(model) = model.map(str::trim).filter(|item| !item.is_empty()) else {
+            return;
+        };
+        let Some(config) = configs
             .iter()
-            .find(|config| config.model == preferred && eligible(config))
+            .find(|config| config.model == model && eligible(config))
+        else {
+            return;
+        };
+        if !selected
+            .iter()
+            .any(|route: &ModelRoute| route.model == config.model)
         {
-            return Some(route_from_config(profile, config));
+            selected.push(route_from_config(profile, config));
+        }
+    };
+
+    append_if_eligible(preferred_model);
+    append_if_eligible(Some(profile.default_model.as_str()));
+
+    let mut remaining = configs
+        .iter()
+        .filter(|config| eligible(config))
+        .collect::<Vec<_>>();
+    remaining.sort_by(|left, right| {
+        left.priority
+            .cmp(&right.priority)
+            .then_with(|| left.model.to_lowercase().cmp(&right.model.to_lowercase()))
+    });
+    for config in remaining {
+        if !selected
+            .iter()
+            .any(|route: &ModelRoute| route.model == config.model)
+        {
+            selected.push(route_from_config(profile, config));
         }
     }
 
-    if let Some(config) = configs
-        .iter()
-        .find(|config| config.model == profile.default_model && eligible(config))
-    {
-        return Some(route_from_config(profile, config));
-    }
-
-    configs
-        .iter()
-        .filter(|config| eligible(config))
-        .min_by(|left, right| {
-            left.priority
-                .cmp(&right.priority)
-                .then_with(|| left.model.to_lowercase().cmp(&right.model.to_lowercase()))
-        })
-        .map(|config| route_from_config(profile, config))
+    selected
 }
 
 pub fn legacy_model_config(model: &str) -> LlmModelConfig {
@@ -215,6 +243,48 @@ mod tests {
         .unwrap();
 
         assert_eq!(route.model, "image-model");
+    }
+
+    #[test]
+    fn select_models_keeps_preferred_and_default_before_priority_fallbacks() {
+        let profile = LlmProfileConfig {
+            id: "profile".into(),
+            name: "测试服务".into(),
+            base_url: "https://example.test/v1".into(),
+            provider: "OpenAI Compatible".into(),
+            wire_api: "responses".into(),
+            reasoning_effort: "medium".into(),
+            api_keys: vec![],
+            models: vec![
+                "backup-low".into(),
+                "preferred".into(),
+                "default".into(),
+                "backup-high".into(),
+            ],
+            default_model: "default".into(),
+            model_configs: vec![
+                model("backup-low", vec![ModelCapability::ImageGeneration], 10),
+                model("preferred", vec![ModelCapability::ImageGeneration], 99),
+                model("default", vec![ModelCapability::ImageGeneration], 50),
+                model("backup-high", vec![ModelCapability::ImageGeneration], 1),
+            ],
+            api_key: None,
+            has_api_key: false,
+        };
+
+        let routes = select_models(
+            &profile,
+            Some("preferred"),
+            ModelRequirement::ImageGeneration,
+        );
+
+        assert_eq!(
+            routes
+                .into_iter()
+                .map(|route| route.model)
+                .collect::<Vec<_>>(),
+            vec!["preferred", "default", "backup-high", "backup-low"]
+        );
     }
 
     #[test]

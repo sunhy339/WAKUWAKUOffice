@@ -8,6 +8,7 @@ import { FilePickerPanel } from './FilePickerPanel'
 import type { AgentTraceEvent, Artifact, ChatAttachment, ChatMessage, InputRef, LLMProfile, PPTProject, ToolKind, ToolConfigMap } from '@/types'
 import { findArtifactTurnGroup, groupArtifactsByTurn } from '@/lib/artifact-turns'
 import { ToolConfigDropdown } from './ToolConfigDropdown'
+import { chatModelsFromProfiles } from '@/lib/model-capabilities'
 
 interface ChatPanelProps {
   messages: ChatMessage[]
@@ -470,13 +471,7 @@ export function ChatPanel({
   ] as const
   const currentPhaseIndex = streamPhase === 'thinking' ? 0 : streamPhase === 'generating' ? 1 : streamPhase === 'finishing' || streamPhase === 'done' ? 2 : -1
 
-  const selectableModels = Array.from(
-    new Set(
-      modelProfiles
-        .flatMap((profile) => profile.models || [])
-        .filter((model) => !/^(agnes|gpt)-(image|video)-/i.test(model) && !/^(image|video)-/i.test(model))
-    )
-  )
+  const selectableModels = chatModelsFromProfiles(modelProfiles)
 
   const showProcessPanel = isStreaming || traceEvents.length > 0 || processLogs.length > 0
   const artifactMeta: Record<string, { icon: typeof Bot; label: string; exportLabel?: string }> = {

@@ -42,11 +42,19 @@ pub async fn fallback_handler(uri: Uri) -> Response {
 
 fn serve_asset(path: &str, asset: rust_embed::EmbeddedFile) -> Response {
     let mime = mime_guess::from_path(path).first_or_octet_stream();
+    // index.html 必须及时获取最新的资源清单；带 hash 的构建产物可以长期缓存。
+    // 如果入口页也缓存，发布新版本后旧入口可能继续引用已不存在的动态 chunk，
+    // 页面会在路由切换或懒加载时出现空白。
+    let cache_control = if path == "index.html" {
+        "no-cache, no-store, must-revalidate"
+    } else {
+        "public, max-age=31536000, immutable"
+    };
     let body = Body::from(asset.data.into_owned());
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, mime.as_ref())
-        .header(header::CACHE_CONTROL, "public, max-age=3600")
+        .header(header::CACHE_CONTROL, cache_control)
         .body(body)
         .unwrap()
 }

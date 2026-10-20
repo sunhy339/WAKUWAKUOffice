@@ -909,21 +909,6 @@ export function ArtifactPanel({
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-1.5">
-            {effectiveTool === 'ppt' && (
-              <>
-                <button
-                  className="btn-secondary h-8 px-2.5 text-xs"
-                  disabled={!canEditCurrentSlide || isGeneratingPpt}
-                  onClick={() => setShowSlideEdit((value) => !value)}
-                  title="使用 AI 修改当前页"
-                >
-                  <Sparkles className="h-3.5 w-3.5" />
-                  AI 修改
-                </button>
-                <button className="btn-secondary h-8 px-2.5 text-xs" disabled={!project} onClick={onPresent}>演示</button>
-                <button className="btn-secondary h-8 px-2.5 text-xs" disabled={!project} onClick={onExportPpt}><Download className="h-3.5 w-3.5" /></button>
-              </>
-            )}
             {canExportActiveArtifact && activeArtifact?.kind === 'document' && (
               <button className="btn-secondary h-8 px-2.5 text-xs" onClick={() => onExportDocx(activeArtifact)}><Download className="h-3.5 w-3.5" /></button>
             )}
@@ -987,8 +972,13 @@ export function ArtifactPanel({
 
         {/* 内容区 */}
         <div className="min-h-0 flex-1 overflow-hidden flex flex-col">
-          {effectiveTool === 'ppt' && <Toolbar />}
-          <div className={`flex-1 overflow-auto flex ${effectiveTool === 'ppt' ? 'items-center justify-center p-2' : 'items-start justify-center p-3'}`}>
+          {effectiveTool === 'ppt' && <Toolbar compact />}
+          {effectiveTool === 'ppt' && slides.length > 0 && (
+            <div className="shrink-0 border-b border-surface-100 bg-white/90">
+              <SlideList slides={slides} currentIndex={currentSlideIndex} onSelect={onSelectSlide} orientation="horizontal" compact />
+            </div>
+          )}
+          <div className={`min-h-0 flex-1 overflow-auto flex ${effectiveTool === 'ppt' ? 'items-center justify-center p-2' : 'items-start justify-center p-3'}`}>
             {effectiveTool === 'ppt' ? (
               slides.length > 0 ? <SlidePreview slide={slides[currentSlideIndex]} layout="16x9" /> : <EmptyArtifact activeTool={effectiveTool} />
             ) : (
@@ -996,6 +986,42 @@ export function ArtifactPanel({
             )}
           </div>
         </div>
+
+        {effectiveTool === 'ppt' && (
+          <div className="shrink-0 border-t border-surface-200 bg-white/95 px-3 pt-2 shadow-[0_-8px_24px_rgba(24,24,27,0.06)] backdrop-blur-xl [padding-bottom:calc(env(safe-area-inset-bottom)+0.75rem)]">
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                className="btn-primary h-10 min-w-0 flex-1 px-3 text-xs"
+                disabled={!canEditCurrentSlide || isGeneratingPpt}
+                onClick={() => setShowSlideEdit((value) => !value)}
+                title="使用 AI 修改当前页"
+              >
+                <Sparkles className="h-3.5 w-3.5 shrink-0" />
+                <span className="truncate">AI 修改当前页</span>
+              </button>
+              <button
+                type="button"
+                className="btn-secondary h-10 shrink-0 px-3 text-xs"
+                disabled={!project}
+                onClick={onPresent}
+                aria-label="演示 PPT"
+              >
+                演示
+              </button>
+              <button
+                type="button"
+                className="btn-secondary h-10 shrink-0 px-3 text-xs"
+                disabled={!project}
+                onClick={onExportPpt}
+                aria-label="导出 PPT"
+              >
+                <Download className="h-3.5 w-3.5" />
+                <span className="hidden min-[380px]:inline">导出</span>
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     )
   }

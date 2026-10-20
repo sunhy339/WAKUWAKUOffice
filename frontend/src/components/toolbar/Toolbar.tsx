@@ -2,7 +2,7 @@ import { ChevronLeft, ChevronRight, ZoomIn, ZoomOut, Maximize2 } from 'lucide-re
 import { useState } from 'react'
 import { usePPTStore } from '@/stores/ppt-store'
 
-export function Toolbar() {
+export function Toolbar({ compact = false }: { compact?: boolean }) {
   const { slides, currentSlideIndex, setCurrentSlide } = usePPTStore()
   const [zoom, setZoom] = useState(1)
 
@@ -10,7 +10,7 @@ export function Toolbar() {
   const canNext = currentSlideIndex < slides.length - 1
 
   return (
-    <div className="h-10 bg-white border-b border-surface-200 flex items-center justify-between px-4 shrink-0">
+    <div className={`h-10 shrink-0 border-b border-surface-200 bg-white flex items-center justify-between ${compact ? 'px-2' : 'px-4'}`}>
       {/* 左侧：翻页 */}
       <div className="flex items-center gap-1">
         <button
@@ -21,7 +21,7 @@ export function Toolbar() {
         >
           <ChevronLeft className="w-4 h-4" />
         </button>
-        <span className="text-sm text-surface-500 px-2">
+        <span className={`text-surface-500 ${compact ? 'px-1 text-xs' : 'px-2 text-sm'}`}>
           {slides.length > 0 ? `${currentSlideIndex + 1} / ${slides.length}` : '0 / 0'}
         </span>
         <button
@@ -35,7 +35,7 @@ export function Toolbar() {
       </div>
 
       {/* 右侧：缩放 */}
-      <div className="flex items-center gap-1">
+      <div className={`flex items-center gap-1 ${compact ? 'shrink-0' : ''}`}>
         <button
           onClick={() => setZoom(Math.max(0.5, zoom - 0.1))}
           className="btn-ghost h-8 w-8 p-0"
@@ -43,7 +43,7 @@ export function Toolbar() {
         >
           <ZoomOut className="w-4 h-4" />
         </button>
-        <span className="text-xs text-surface-400 w-12 text-center">
+        <span className="w-11 text-center text-[11px] text-surface-400">
           {Math.round(zoom * 100)}%
         </span>
         <button

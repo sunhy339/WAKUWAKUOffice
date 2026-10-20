@@ -7,10 +7,13 @@ interface SlideListProps {
   slides: Slide[]
   currentIndex: number
   onSelect: (index: number) => void
+  orientation?: 'vertical' | 'horizontal'
+  compact?: boolean
 }
 
-export function SlideList({ slides, currentIndex, onSelect }: SlideListProps) {
+export function SlideList({ slides, currentIndex, onSelect, orientation = 'vertical', compact = false }: SlideListProps) {
   const itemRefs = useRef<Array<HTMLButtonElement | null>>([])
+  const isHorizontal = orientation === 'horizontal'
 
   useEffect(() => {
     itemRefs.current[currentIndex]?.scrollIntoView({
@@ -20,14 +23,14 @@ export function SlideList({ slides, currentIndex, onSelect }: SlideListProps) {
   }, [currentIndex])
 
   return (
-    <div className="p-3">
-      <div className="flex items-center justify-between mb-3">
+    <div className={isHorizontal ? 'px-3 py-2' : 'p-3'}>
+      <div className={`flex items-center justify-between ${isHorizontal ? 'mb-2' : 'mb-3'}`}>
         <span className="text-xs font-medium text-surface-500 uppercase tracking-wide">
           幻灯片 ({slides.length})
         </span>
       </div>
 
-      <div className="space-y-2">
+      <div className={isHorizontal ? 'flex gap-2 overflow-x-auto pb-1' : 'space-y-2'}>
         {slides.map((slide, i) => (
           <button
             key={slide.id}
@@ -35,7 +38,8 @@ export function SlideList({ slides, currentIndex, onSelect }: SlideListProps) {
               itemRefs.current[i] = node
             }}
             onClick={() => onSelect(i)}
-            className={`w-full group relative rounded-lg overflow-hidden border-2 transition-all ${
+            aria-label={`选择第 ${i + 1} 页${slide.title ? `：${slide.title}` : ''}`}
+            className={`${isHorizontal ? 'w-[88px] shrink-0' : 'w-full'} group relative overflow-hidden rounded-lg border-2 transition-all ${
               i === currentIndex
                 ? 'border-primary-500 ring-2 ring-primary-100'
                 : 'border-surface-200 hover:border-surface-300'
@@ -52,11 +56,12 @@ export function SlideList({ slides, currentIndex, onSelect }: SlideListProps) {
             </div>
 
             {/* 标题 */}
-            {slide.title && (
+            {slide.title && !compact && (
               <div className="px-2 py-1 text-xs text-surface-600 truncate bg-surface-50">
                 {slide.title}
               </div>
             )}
+            {compact && <div className="bg-surface-50 px-1 py-1 text-center text-[10px] text-surface-500">第 {i + 1} 页</div>}
           </button>
         ))}
 

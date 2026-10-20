@@ -234,6 +234,9 @@ export default function Studio() {
   // 历史会话详情是异步请求；用序号丢弃较早的响应，避免快速点击 A → B
   // 时，A 的慢响应又把主对话覆盖回去。
   const conversationLoadRef = useRef(0)
+  // 首次从 URL 恢复会话时，空白首个 Tab 的 sessionId 不能抢先把 URL
+  // 清掉；否则历史详情还没写入 Tab，就会丢失 ?s= 会话定位参数。
+  const initialSessionRestoreRef = useRef<boolean | null>(null)
 
   // 右侧展示区只是当前 tab 的 UI 状态，不能让后台任务的事件污染当前活跃 tab。
   // 这里保留一个显式的 tab 级写入口，供 SSE 回调更新发起请求的 tab。
@@ -356,8 +359,11 @@ export default function Studio() {
     loadHistoryArtifacts()
     // 从 URL 恢复会话
     const restoreSessionId = searchParams.get('s')
+    initialSessionRestoreRef.current = Boolean(restoreSessionId)
     if (restoreSessionId) {
-      handleSelectConversation(restoreSessionId)
+      void handleSelectConversation(restoreSessionId).finally(() => {
+        initialSessionRestoreRef.current = false
+      })
     }
   }, [])
 
@@ -412,6 +418,7 @@ export default function Studio() {
   // sessionId 变化时同步到 URL
   useEffect(() => {
     const current = searchParams.get('s')
+    if (initialSessionRestoreRef.current && !sessionId) return
     if (sessionId && current !== sessionId) {
       setSearchParams({ s: sessionId }, { replace: true })
     } else if (!sessionId && current) {

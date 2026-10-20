@@ -220,6 +220,10 @@ export default function Studio() {
   const activeArtifact = artifacts.find((artifact) => artifact.id === activeArtifactId) || null
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const abortRef = useRef<AbortController | null>(null)
+  // 每个生成请求都有独立的所有权。历史会话加载、切换文件页或切换 Tab
+  // 都不应使后台任务失效；只有同一 Tab 开始了新的请求，旧请求的事件才应被丢弃。
+  const requestCounterRef = useRef(0)
+  const requestOwnerRef = useRef<Record<string, number>>({})
   const retryRequestsRef = useRef<Record<string, RetryRequest>>({})
   const autoExportedArtifactIdsRef = useRef<Set<string>>(new Set())
   const autoSavedArtifactIdsRef = useRef<Set<string>>(new Set())
@@ -548,21 +552,22 @@ export default function Studio() {
 
     // 恢复目标 tab 的本地 UI 状态
     const targetUi = tabUiState[tabId]
-    if (targetUi) {
-      setInput(targetUi.input || '')
-      setAttachments(targetUi.attachments || [])
-      setInputRefs(targetUi.inputRefs || [])
-      setActiveTool(targetUi.activeTool || 'general')
-      setActiveProjectId(targetUi.activeProjectId || null)
-      setSelectedTheme(targetUi.selectedTheme || 'default')
-      setToolConfig(targetUi.toolConfig || {})
-      setStreamStatus(targetUi.streamStatus || '空闲')
-      setStreamPhase(targetUi.streamPhase || 'idle')
-      setProcessLogs(targetUi.processLogs || [])
-      setShowArtifactPanel(targetUi.showArtifactPanel || false)
-      setPptProgress(targetUi.pptProgress || null)
-      setFollowLatestSlide(targetUi.followLatestSlide ?? true)
-    }
+    const targetTabState = usePPTStore.getState().tabs[tabId]
+    setInput(targetUi?.input || targetTabState?.input || '')
+    setAttachments(targetUi?.attachments || targetTabState?.attachments || [])
+    setInputRefs(targetUi?.inputRefs || targetTabState?.inputRefs || [])
+    // SSE 在后台运行时直接写入 store Tab；切回时优先读取最新 Tab，
+    // 避免旧的本地 UI 快照覆盖生成进度和过程日志。
+    setActiveTool(targetTabState?.activeTool || targetUi?.activeTool || 'general')
+    setActiveProjectId(targetTabState?.activeProjectId ?? targetUi?.activeProjectId ?? null)
+    setSelectedTheme(targetUi?.selectedTheme || targetTabState?.selectedTheme || 'default')
+    setToolConfig(targetUi?.toolConfig || targetTabState?.toolConfig || {})
+    setStreamStatus(targetTabState?.streamStatus || targetUi?.streamStatus || '空闲')
+    setStreamPhase(targetTabState?.streamPhase || targetUi?.streamPhase || 'idle')
+    setProcessLogs(targetTabState?.processLogs?.length ? targetTabState.processLogs : (targetUi?.processLogs || []))
+    setShowArtifactPanel(Boolean(targetUi?.showArtifactPanel || targetTabState?.artifacts.length))
+    setPptProgress(targetUi?.pptProgress || null)
+    setFollowLatestSlide(targetUi?.followLatestSlide ?? true)
 
     // 同步 URL
     const targetTab = tabs[tabId]
@@ -1340,9 +1345,9 @@ export default function Studio() {
     const message = retryRequest?.message || computedMessage
     const pendingAttachments = draftAttachments
     const requestTarget = retryRequest?.target ?? target
-    const requestLoadId = conversationLoadRef.current
     const requestTabId = activeTabId
     const requestTabKey = requestTabId || ''
+    const requestId = ++requestCounterRef.current
     const currentRequestTab = requestTabId ? usePPTStore.getState().tabs[requestTabId] : null
     const requestProjectId = retryRequest?.projectId
       ?? (requestTarget?.operation === 'edit_slide' ? (currentRequestTab?.project?.id || activeProjectId) : activeProjectId)
@@ -1352,7 +1357,8 @@ export default function Studio() {
     const requestToolConfig = retryRequest?.toolConfig ?? toolConfig
     const inferredTool = retryRequest?.toolKind || (requestTarget?.operation === 'edit_slide' ? 'ppt' : inferToolFromMessage(message, pendingAttachments))
     const isRequestTabActive = () => usePPTStore.getState().activeTabId === requestTabId
-    const isCurrentRequest = () => conversationLoadRef.current === requestLoadId
+    const ownsRequest = () => !requestTabId || requestOwnerRef.current[requestTabId] === requestId
+    if (requestTabId) requestOwnerRef.current[requestTabId] = requestId
     if (requestTabId) delete retryRequestsRef.current[requestTabId]
 
     const rememberRetryRequest = () => {
@@ -1456,6 +1462,8 @@ export default function Studio() {
         requestModel,
         pendingAttachments,
         (sseEvent) => {
+          // 旧请求可能在用户点击“停止”后仍收到尾部事件，不能污染同一 Tab 的新请求。
+          if (!ownsRequest()) return
           // SSE 属于发起请求的 tab。切换到其他会话后仍要继续接收，
           // 只写回 requestTabId，不能因为当前页面切换就丢掉后台任务进度。
           const { event, data } = sseEvent
@@ -1607,7 +1615,15 @@ export default function Studio() {
               break
 
             case 'state_update':
-              if (requestTabId) updateTab(requestTabId, { streamPhase: data.phase === 'done' ? ('done' as const) : ('generating' as const), streamStatus: data.detail || data.step || '正在处理...' })
+              if (requestTabId) {
+                const log = `${data.step || '进度'}：${data.detail || ''}`
+                const tab = usePPTStore.getState().tabs[requestTabId]
+                updateTab(requestTabId, {
+                  streamPhase: data.phase === 'done' ? ('done' as const) : ('generating' as const),
+                  streamStatus: data.detail || data.step || '正在处理...',
+                  processLogs: [...(tab?.processLogs || []).slice(-8), log],
+                })
+              }
               if (isRequestTabActive()) {
                 setStreamPhase(data.phase === 'done' ? 'done' : 'generating')
                 setStreamStatus(data.detail || data.step || '正在处理...')
@@ -1618,12 +1634,19 @@ export default function Studio() {
             case 'tool_result': {
               const toolName = data.tool || 'unknown'
               const detail = data.error || data.result?.error || data.result?.observation || ''
+              const log = data.success
+                ? `工具 ${toolName} ✓ 完成`
+                : `工具 ${toolName} ✗ 失败：${detail ? String(detail).slice(0, 300) : '未返回具体错误'}`
+              if (requestTabId) {
+                const tab = usePPTStore.getState().tabs[requestTabId]
+                updateTab(requestTabId, { processLogs: [...(tab?.processLogs || []).slice(-8), log] })
+              }
               if (isRequestTabActive() && data.success) {
-                setProcessLogs((logs) => [...logs.slice(-8), `工具 ${toolName} ✓ 完成`])
+                setProcessLogs((logs) => [...logs.slice(-8), log])
               } else if (isRequestTabActive()) {
                 const message = detail ? String(detail).slice(0, 300) : '未返回具体错误'
                 setStreamStatus(`工具 ${toolName} 失败：${message}`)
-                setProcessLogs((logs) => [...logs.slice(-8), `工具 ${toolName} ✗ 失败：${message}`])
+                setProcessLogs((logs) => [...logs.slice(-8), log])
               }
               break
             }
@@ -1701,7 +1724,7 @@ export default function Studio() {
     } catch (err) {
       // 历史会话切换不会取消后台任务；只有同一 tab 已经开始了新的请求时，
       // 才丢弃旧请求的收尾状态。
-      if (!isCurrentRequest() && isRequestTabActive()) return
+      if (!ownsRequest()) return
       console.error('Chat error:', err)
       const aborted = err instanceof DOMException && err.name === 'AbortError'
       const errorMessage = err instanceof Error ? err.message : '发生了未知错误'
@@ -1733,17 +1756,17 @@ export default function Studio() {
           : { tabs: { ...state.tabs, [requestTabKey]: nextTab } }
       })
     } finally {
-      if (!isCurrentRequest() && isRequestTabActive()) {
-        if (abortRef.current === abortController) abortRef.current = null
-        return
-      }
+      if (!ownsRequest()) return
       if (isRequestTabActive()) {
         setStreaming(false)
-        abortRef.current = null
       }
+      if (abortRef.current === abortController) abortRef.current = null
       refreshConversations()
       refreshProjects()
       if (requestTabId) updateTab(requestTabId, { isStreaming: false })
+      if (requestTabId && requestOwnerRef.current[requestTabId] === requestId) {
+        delete requestOwnerRef.current[requestTabId]
+      }
     }
   }
 

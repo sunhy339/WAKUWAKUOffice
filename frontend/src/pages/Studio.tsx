@@ -18,6 +18,20 @@ const LOGO_URL = '/logo.png'
 
 type ToastTone = 'success' | 'error' | 'info'
 
+interface RetryRequest {
+  message: string
+  displayMessage: string
+  projectId: string | null
+  sessionId: string | null
+  theme: string | null
+  toolKind: ToolKind
+  model: string | null
+  attachments: ChatAttachment[]
+  inputRefs: InputRef[]
+  toolConfig: ToolConfigMap
+  target?: ChatTargetContext
+}
+
 interface ToastState {
   message: string
   tone: ToastTone
@@ -206,6 +220,7 @@ export default function Studio() {
   const activeArtifact = artifacts.find((artifact) => artifact.id === activeArtifactId) || null
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const abortRef = useRef<AbortController | null>(null)
+  const retryRequestsRef = useRef<Record<string, RetryRequest>>({})
   const autoExportedArtifactIdsRef = useRef<Set<string>>(new Set())
   const autoSavedArtifactIdsRef = useRef<Set<string>>(new Set())
   const attachmentInputRef = useRef<HTMLInputElement>(null)
@@ -224,7 +239,7 @@ export default function Studio() {
     const nextArtifacts = Array.from(byId.values())
     updateTab(tabId, {
       artifacts: nextArtifacts,
-      activeArtifactId: activeId === undefined ? (incoming.at(-1)?.id || tab.activeArtifactId) : activeId,
+      activeArtifactId: activeId === undefined ? (incoming[incoming.length - 1]?.id || tab.activeArtifactId) : activeId,
     })
   }
 
@@ -467,6 +482,8 @@ export default function Studio() {
       showToast('当前任务仍在生成中，暂不能关闭；可以先切换到其他会话。', 'info')
       return
     }
+
+    delete retryRequestsRef.current[tabId]
 
     // 如果关闭的是活跃 tab，先保存状态
     if (tabId === activeTabId) {
@@ -1299,11 +1316,12 @@ export default function Studio() {
     return activeTool
   }
 
-  const handleSend = async (messageOverride?: string, target?: ChatTargetContext) => {
-    const isDirectAction = messageOverride !== undefined
-    const draftInput = isDirectAction ? messageOverride : input
-    const draftAttachments = isDirectAction ? [] : attachments
-    const draftInputRefs = isDirectAction ? [] : inputRefs
+  const handleSend = async (messageOverride?: string, target?: ChatTargetContext, retryRequest?: RetryRequest) => {
+    const isRetry = Boolean(retryRequest)
+    const isDirectAction = !isRetry && messageOverride !== undefined
+    const draftInput = retryRequest?.displayMessage ?? (isDirectAction ? messageOverride : input)
+    const draftAttachments = retryRequest?.attachments ?? (isDirectAction ? [] : attachments)
+    const draftInputRefs = retryRequest?.inputRefs ?? (isDirectAction ? [] : inputRefs)
     if ((!draftInput.trim() && draftAttachments.length === 0 && draftInputRefs.length === 0) || isStreaming) return
 
     const hasImageAttachment = draftAttachments.some((item) => item.kind === 'image')
@@ -1316,15 +1334,43 @@ export default function Studio() {
     const refContext = refSummaries.length > 0
       ? `\n\n--- 引用产物内容 ---\n${refSummaries.join('\n\n')}\n--- 引用产物内容结束 ---`
       : ''
-    const message = (refsText || refContext)
+    const computedMessage = (refsText || refContext)
       ? (baseMessage.trim() ? `${baseMessage}\n\n${refsText}${refContext}` : `${refsText}${refContext}`)
       : baseMessage
+    const message = retryRequest?.message || computedMessage
     const pendingAttachments = draftAttachments
-    const inferredTool = target?.operation === 'edit_slide' ? 'ppt' : inferToolFromMessage(message, pendingAttachments)
+    const requestTarget = retryRequest?.target ?? target
     const requestLoadId = conversationLoadRef.current
     const requestTabId = activeTabId
+    const requestTabKey = requestTabId || ''
+    const currentRequestTab = requestTabId ? usePPTStore.getState().tabs[requestTabId] : null
+    const requestProjectId = retryRequest?.projectId
+      ?? (requestTarget?.operation === 'edit_slide' ? (currentRequestTab?.project?.id || activeProjectId) : activeProjectId)
+    const requestSessionId = retryRequest?.sessionId || currentRequestTab?.sessionId || sessionId
+    const requestTheme = retryRequest?.theme ?? selectedTheme
+    const requestModel = retryRequest?.model ?? selectedModel
+    const requestToolConfig = retryRequest?.toolConfig ?? toolConfig
+    const inferredTool = retryRequest?.toolKind || (requestTarget?.operation === 'edit_slide' ? 'ppt' : inferToolFromMessage(message, pendingAttachments))
     const isRequestTabActive = () => usePPTStore.getState().activeTabId === requestTabId
     const isCurrentRequest = () => conversationLoadRef.current === requestLoadId
+    if (requestTabId) delete retryRequestsRef.current[requestTabId]
+
+    const rememberRetryRequest = () => {
+      if (!requestTabId) return
+      retryRequestsRef.current[requestTabId] = {
+        message,
+        displayMessage: baseMessage,
+        projectId: requestProjectId,
+        sessionId: usePPTStore.getState().tabs[requestTabId]?.sessionId || requestSessionId,
+        theme: requestTheme,
+        toolKind: inferredTool,
+        model: requestModel,
+        attachments: pendingAttachments,
+        inputRefs: draftInputRefs,
+        toolConfig: requestToolConfig,
+        target: requestTarget,
+      }
+    }
     if (inferredTool !== activeTool) setActiveTool(inferredTool)
     if (!isDirectAction) {
       setInput('')
@@ -1333,7 +1379,7 @@ export default function Studio() {
     }
     setStreaming(true)
     // 单页编辑必须保留用户当前选中的页；只有整套 PPT 生成时才跟随最新页。
-    setFollowLatestSlide(target?.operation !== 'edit_slide')
+    setFollowLatestSlide(requestTarget?.operation !== 'edit_slide')
     setPptProgress(null)
     setStreamPhase('thinking')
     setStreamStatus(pendingAttachments.length > 0 ? '正在整理消息与附件...' : '正在理解需求...')
@@ -1355,13 +1401,26 @@ export default function Studio() {
     const abortController = new AbortController()
     abortRef.current = abortController
 
-    addMessage({
-      role: 'user',
-      content: baseMessage,
-      timestamp: new Date().toISOString(),
-      attachments: pendingAttachments,
-      inputRefs: inputRefs.length > 0 ? inputRefs : undefined,
-    })
+    if (isRetry) {
+      usePPTStore.setState((state) => {
+        if (!requestTabId) return state
+        const tab = state.tabs[requestTabId]
+        if (!tab || tab.messages[tab.messages.length - 1]?.role !== 'assistant') return state
+        const messages = tab.messages.slice(0, -1)
+        const nextTab = { ...tab, messages }
+        return state.activeTabId === requestTabId
+          ? { messages, tabs: { ...state.tabs, [requestTabId]: nextTab } }
+          : { tabs: { ...state.tabs, [requestTabId]: nextTab } }
+      })
+    } else {
+      addMessage({
+        role: 'user',
+        content: baseMessage,
+        timestamp: new Date().toISOString(),
+        attachments: pendingAttachments,
+        inputRefs: draftInputRefs.length > 0 ? draftInputRefs : undefined,
+      })
+    }
 
     // 发给后端的消息仍包含完整引用上下文
 
@@ -1390,11 +1449,11 @@ export default function Studio() {
     try {
       await chatApi.stream(
         message,
-        target?.operation === 'edit_slide' ? (project?.id || activeProjectId) : activeProjectId,
-        sessionId,
-        selectedTheme,
+        requestProjectId,
+        requestSessionId,
+        requestTheme,
         inferredTool,
-        selectedModel,
+        requestModel,
         pendingAttachments,
         (sseEvent) => {
           // SSE 属于发起请求的 tab。切换到其他会话后仍要继续接收，
@@ -1409,7 +1468,7 @@ export default function Studio() {
               if (data.text) {
                 assistantText += data.text
                 usePPTStore.setState((state) => {
-                  const targetTab = requestTabId ? state.tabs[requestTabId] : null
+                  const targetTab = requestTabKey ? state.tabs[requestTabKey] : null
                   if (!targetTab) return state
                   const msgs = [...targetTab.messages]
                   msgs[msgs.length - 1] = {
@@ -1417,9 +1476,9 @@ export default function Studio() {
                     content: assistantText,
                   }
                   const nextTab = { ...targetTab, messages: msgs }
-                  return state.activeTabId === requestTabId
-                    ? { messages: msgs, tabs: { ...state.tabs, [requestTabId]: nextTab } }
-                    : { tabs: { ...state.tabs, [requestTabId]: nextTab } }
+                  return state.activeTabId === requestTabKey
+                    ? { messages: msgs, tabs: { ...state.tabs, [requestTabKey]: nextTab } }
+                    : { tabs: { ...state.tabs, [requestTabKey]: nextTab } }
                 })
               }
               if (data.session_id) {
@@ -1434,7 +1493,8 @@ export default function Studio() {
                   refreshProjects()
                 }
               }
-              if (data.project_id && !project) {
+              const requestTabProject = requestTabId ? usePPTStore.getState().tabs[requestTabId]?.project : null
+              if (data.project_id && !requestTabProject) {
                 pptApi.getProject(data.project_id).then(({ data: proj }) => {
                   if (!requestTabId || !usePPTStore.getState().tabs[requestTabId]) return
                   if (requestTabId) updateTab(requestTabId, { project: proj, slides: proj.slides || [] })
@@ -1499,7 +1559,7 @@ export default function Studio() {
                 }
                 if (data.artifact.kind === 'ppt') {
                   if (requestTabId) applyPptStateToTab(requestTabId, data.artifact.content || {})
-                  if (isRequestTabActive()) applyPptArtifact(data.artifact, target?.operation === 'edit_slide')
+                  if (isRequestTabActive()) applyPptArtifact(data.artifact, requestTarget?.operation === 'edit_slide')
                   if (typeof data.artifact.content?.total_slides === 'number' && isRequestTabActive()) {
                     setPptProgress({
                       current: data.artifact.content?.slide_count || data.artifact.content?.slides?.length || 0,
@@ -1589,12 +1649,12 @@ export default function Studio() {
               const pptArtifact = doneArtifacts.find((item: Artifact) => item.kind === 'ppt')
               if (pptArtifact) {
                 if (requestTabId) applyPptStateToTab(requestTabId, pptArtifact.content || {})
-                if (isRequestTabActive()) applyPptArtifact(pptArtifact, target?.operation === 'edit_slide')
+                if (isRequestTabActive()) applyPptArtifact(pptArtifact, requestTarget?.operation === 'edit_slide')
                 const total = pptArtifact.content?.total_slides || pptArtifact.content?.slide_count || pptArtifact.content?.slides?.length || 0
                 if (total > 0 && isRequestTabActive()) {
                   setPptProgress({ current: total, total })
                 }
-              } else if (data.project_id && !project) {
+              } else if (data.project_id && !(requestTabId ? usePPTStore.getState().tabs[requestTabId]?.project : null)) {
                 pptApi.getProject(data.project_id).then(({ data: proj }) => {
                   if (!requestTabId || !usePPTStore.getState().tabs[requestTabId]) return
                   if (requestTabId) updateTab(requestTabId, { project: proj, slides: proj.slides || [] })
@@ -1609,6 +1669,7 @@ export default function Studio() {
 
             case 'error':
               console.error('SSE error:', data)
+              rememberRetryRequest()
               if (requestTabId) updateTab(requestTabId, { isStreaming: false, streamPhase: 'error', streamStatus: data.message || data.detail || '生成失败' })
               if (isRequestTabActive()) {
                 setStreamPhase('error')
@@ -1616,7 +1677,7 @@ export default function Studio() {
                 setPptProgress(null)
               }
               usePPTStore.setState((state) => {
-                const targetTab = requestTabId ? state.tabs[requestTabId] : null
+                const targetTab = requestTabKey ? state.tabs[requestTabKey] : null
                 if (!targetTab) return state
                 const msgs = [...targetTab.messages]
                 msgs[msgs.length - 1] = {
@@ -1624,17 +1685,17 @@ export default function Studio() {
                   content: `抱歉，生成失败：${data.message || data.detail || '请稍后重试'}`,
                 }
                 const nextTab = { ...targetTab, messages: msgs }
-                return state.activeTabId === requestTabId
-                  ? { messages: msgs, tabs: { ...state.tabs, [requestTabId]: nextTab } }
-                  : { tabs: { ...state.tabs, [requestTabId]: nextTab } }
+                return state.activeTabId === requestTabKey
+                  ? { messages: msgs, tabs: { ...state.tabs, [requestTabKey]: nextTab } }
+                  : { tabs: { ...state.tabs, [requestTabKey]: nextTab } }
               })
               break
           }
         },
         token,
         abortController.signal,
-        toolConfig,
-        target,
+        requestToolConfig,
+        requestTarget,
         baseMessage
       )
     } catch (err) {
@@ -1644,6 +1705,7 @@ export default function Studio() {
       console.error('Chat error:', err)
       const aborted = err instanceof DOMException && err.name === 'AbortError'
       const errorMessage = err instanceof Error ? err.message : '发生了未知错误'
+      if (!aborted) rememberRetryRequest()
       if (isRequestTabActive() && !aborted && pendingAttachments.length > 0) {
         setAttachments(pendingAttachments)
       }
@@ -1654,7 +1716,7 @@ export default function Studio() {
       }
       if (requestTabId) updateTab(requestTabId, { isStreaming: false, streamPhase: aborted ? 'idle' : 'error', streamStatus: aborted ? '已停止生成' : errorMessage })
       usePPTStore.setState((state) => {
-        const targetTab = requestTabId ? state.tabs[requestTabId] : null
+        const targetTab = requestTabKey ? state.tabs[requestTabKey] : null
         if (!targetTab) return state
         const msgs = [...targetTab.messages]
         msgs[msgs.length - 1] = {
@@ -1666,9 +1728,9 @@ export default function Studio() {
             : `抱歉，发生了错误：${errorMessage}`,
         }
         const nextTab = { ...targetTab, messages: msgs }
-        return state.activeTabId === requestTabId
-          ? { messages: msgs, tabs: { ...state.tabs, [requestTabId]: nextTab } }
-          : { tabs: { ...state.tabs, [requestTabId]: nextTab } }
+        return state.activeTabId === requestTabKey
+          ? { messages: msgs, tabs: { ...state.tabs, [requestTabKey]: nextTab } }
+          : { tabs: { ...state.tabs, [requestTabKey]: nextTab } }
       })
     } finally {
       if (!isCurrentRequest() && isRequestTabActive()) {
@@ -1683,6 +1745,16 @@ export default function Studio() {
       refreshProjects()
       if (requestTabId) updateTab(requestTabId, { isStreaming: false })
     }
+  }
+
+  const handleRetry = () => {
+    if (!activeTabId || isStreaming) return
+    const retryRequest = retryRequestsRef.current[activeTabId]
+    if (!retryRequest) {
+      showToast('没有可重试的请求', 'info')
+      return
+    }
+    void handleSend(undefined, retryRequest.target, retryRequest)
   }
 
   const handleEditSlide = (instruction: string) => {
@@ -2184,6 +2256,7 @@ export default function Studio() {
                 onInputChange={setInput}
                 onSend={handleSend}
                 onStop={handleStop}
+                onRetry={handleRetry}
                 onToolConfigChange={setToolConfig}
                 attachments={attachments}
                 onPickAttachments={handlePickAttachments}

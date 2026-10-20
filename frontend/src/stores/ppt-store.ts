@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { Artifact, PPTProject, Slide, ChatMessage, ChatStreamPhase, ToolKind } from '@/types';
+import type { Artifact, PPTProject, Slide, ChatMessage, ChatStreamPhase, ToolKind, InputRef } from '@/types';
 
 interface ConversationState {
   project: PPTProject | null;
@@ -17,6 +17,7 @@ interface ConversationState {
   streamPhase: ChatStreamPhase;
   processLogs: string[];
   attachments: any[];
+  inputRefs: InputRef[];
   selectedTheme: string;
   toolConfig: Record<string, any>;
   selectedModel: string;
@@ -100,6 +101,7 @@ function createInitialTabState(tabId: string, overrides?: Partial<ConversationSt
     streamPhase: 'idle',
     processLogs: [],
     attachments: [],
+    inputRefs: [],
     selectedTheme: 'default',
     toolConfig: {},
     selectedModel: '',

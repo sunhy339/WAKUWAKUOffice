@@ -164,7 +164,7 @@ export default function Studio() {
     setProject, setSlides, setCurrentSlide,
     addMessage, setStreaming, setSessionId, reset,
     upsertArtifact, updateArtifact, setActiveArtifact,
-    activeTabId, tabs, openTab, closeTab, switchTab, updateTab, restoreState,
+    activeTabId, tabs, openTab, closeTab, switchTab, updateTab, restoreTabState,
   } = usePPTStore()
 
   const [showArtifactPanel, setShowArtifactPanel] = useState(false)
@@ -213,6 +213,29 @@ export default function Studio() {
   // 历史会话详情是异步请求；用序号丢弃较早的响应，避免快速点击 A → B
   // 时，A 的慢响应又把主对话覆盖回去。
   const conversationLoadRef = useRef(0)
+
+  // 右侧展示区只是当前 tab 的 UI 状态，不能让后台任务的事件污染当前活跃 tab。
+  // 这里保留一个显式的 tab 级写入口，供 SSE 回调更新发起请求的 tab。
+  const updateTabArtifacts = (tabId: string, incoming: Artifact[], activeId?: string | null) => {
+    const tab = usePPTStore.getState().tabs[tabId]
+    if (!tab) return
+    const byId = new Map(tab.artifacts.map((artifact) => [artifact.id, artifact]))
+    for (const artifact of incoming) byId.set(artifact.id, artifact)
+    const nextArtifacts = Array.from(byId.values())
+    updateTab(tabId, {
+      artifacts: nextArtifacts,
+      activeArtifactId: activeId === undefined ? (incoming.at(-1)?.id || tab.activeArtifactId) : activeId,
+    })
+  }
+
+  useEffect(() => {
+    if (!activeTabId) return
+    setTabUiState((prev) => {
+      const current = prev[activeTabId]
+      if (!current || current.showArtifactPanel === showArtifactPanel) return prev
+      return { ...prev, [activeTabId]: { ...current, showArtifactPanel } }
+    })
+  }, [activeTabId, showArtifactPanel])
 
   const showToast = (message: string, tone: ToastTone = 'info') => {
     setToast({ message, tone })
@@ -438,6 +461,13 @@ export default function Studio() {
   }
 
   const handleCloseTab = (tabId: string) => {
+    const tab = usePPTStore.getState().tabs[tabId]
+    const isWorking = Boolean(tab?.isStreaming && tab.streamPhase !== 'done' && tab.streamPhase !== 'error' && tab.streamPhase !== 'idle')
+    if (isWorking) {
+      showToast('当前任务仍在生成中，暂不能关闭；可以先切换到其他会话。', 'info')
+      return
+    }
+
     // 如果关闭的是活跃 tab，先保存状态
     if (tabId === activeTabId) {
       setTabUiState((prev) => {
@@ -447,12 +477,6 @@ export default function Studio() {
     }
 
     // 如果 tab 正在 streaming，中止
-    const tab = tabs[tabId]
-    if (tab?.isStreaming) {
-      // abortRef 在当前作用域只能控制活跃 tab，后台 tab 的 abort 需要额外管理
-      // 简化方案：如果关闭的不是活跃 tab 且正在 streaming，让它后台完成
-    }
-
     closeTab(tabId)
     setTabUiState((prev) => {
       const next = { ...prev }
@@ -641,24 +665,44 @@ export default function Studio() {
   }
 
   const handleSelectConversation = async (id: string) => {
+    const currentStore = usePPTStore.getState()
+    const existingTab = Object.values(currentStore.tabs).find((tab) => tab.sessionId === id)
+    if (existingTab) {
+      if (existingTab.tabId !== currentStore.activeTabId) handleSelectTab(existingTab.tabId)
+      return
+    }
+
+    // 历史会话不能覆盖当前正在工作的 tab。没有对应本地 tab 时，
+    // 在任务空间中打开一个独立 tab，保证切换历史不会中断生图/生视频。
+    let targetTabId = currentStore.activeTabId
+    const currentTab = targetTabId ? currentStore.tabs[targetTabId] : null
+    if (!targetTabId || currentTab?.isStreaming || currentTab?.sessionId || (currentTab?.messages.length || 0) > 0) {
+      tabCounterRef.current += 1
+      targetTabId = `tab-${Date.now()}-${tabCounterRef.current}`
+      openTab(targetTabId)
+      setTabUiState((prev) => ({
+        ...prev,
+        [targetTabId!]: {
+          input: '', attachments: [], inputRefs: [], streamStatus: '空闲', streamPhase: 'idle',
+          processLogs: [], activeTool: 'general', activeProjectId: null, selectedTheme,
+          toolConfig: {}, showArtifactPanel: false, pptProgress: null, followLatestSlide: false,
+        },
+      }))
+    }
+
     const loadId = ++conversationLoadRef.current
     const isLatestLoad = () => conversationLoadRef.current === loadId
+    const isTargetTabActive = () => usePPTStore.getState().activeTabId === targetTabId
 
-    // 如果正在 streaming，先中止当前请求再切换
-    if (isStreaming) {
-      abortRef.current?.abort()
-      setStreaming(false)
-      setStreamPhase('idle')
-      setStreamStatus('已停止生成')
-      if (activeTabId) updateTab(activeTabId, { isStreaming: false, streamPhase: 'idle', streamStatus: '已停止生成' })
-    }
     setActiveView('chat')
     try {
       const res = await sessionApi.getSession(id)
       if (!isLatestLoad()) return
 
       const session = res.data as PersistedSession
-      const tool = session.tool_kind || 'general'
+      const restoredArtifacts = session.artifacts || []
+      const pptArtifact = restoredArtifacts.find((artifact) => artifact.kind === 'ppt')
+      const tool = session.tool_kind || pptArtifact?.tool_kind || 'general'
 
       let restoredProject: typeof project = null
       let restoredSlides = [] as typeof slides
@@ -679,17 +723,49 @@ export default function Studio() {
         }
       }
 
+      // PPT 会话为了兼容通用 projects 表，可能不会把 PPT 项目 ID 写入
+      // sessions.project_id。历史产物本身带有 project_id/slides，此处必须用
+      // 它们恢复右侧预览，否则会出现“文件里有 PPT，右侧空白”的情况。
+      const restoredPptProjectId = pptArtifact?.content?.project_id as string | undefined
+      if (!restoredProject && (tool === 'ppt' || pptArtifact)) {
+        const projectId = restoredPptProjectId || session.project_id
+        if (projectId) {
+          try {
+            const pptRes = await pptApi.getProject(projectId)
+            restoredProject = pptRes.data
+            restoredSlides = pptRes.data.slides || []
+          } catch {
+            // 老数据可能只有产物快照，没有可读取的 PPT 项目文件；继续使用快照。
+          }
+        }
+
+        if (restoredSlides.length === 0 && Array.isArray(pptArtifact?.content?.slides)) {
+          const content = pptArtifact.content
+          restoredSlides = content.slides
+          restoredProject = {
+            id: restoredPptProjectId || pptArtifact!.id,
+            title: content.title || pptArtifact!.title,
+            theme: content.theme || 'default',
+            slides: restoredSlides,
+            history: content.history || [],
+            layout: '16x9',
+            created_at: pptArtifact!.created_at,
+            updated_at: pptArtifact!.updated_at,
+            owner_id: useAuthStore.getState().user?.id,
+          }
+        }
+      }
+
       if (!isLatestLoad()) return
 
       const restoredMessages = buildRestoredMessages(session)
-      const restoredArtifacts = session.artifacts || []
       const restoredProcessLogs = buildHistoryProcessLogs(session)
-      const restoredTabId = usePPTStore.getState().activeTabId
+      const restoredTabId = targetTabId
 
       // 必须通过 store 的 tab-aware 入口写入。此前直接 setState 只更新了
       // 顶层 messages/artifacts，当前 tab 仍保留旧内容；下一次切 tab 时
       // syncFromTab 会把旧内容重新覆盖回来，表现为“历史会话不对”。
-      restoreState({
+      restoreTabState(restoredTabId, {
         project: restoredProject,
         slides: restoredSlides,
         currentSlideIndex: 0,
@@ -700,7 +776,7 @@ export default function Studio() {
         isStreaming: false,
         sessionId: session.id,
         activeTool: tool,
-        activeProjectId: session.project_id || null,
+        activeProjectId: restoredProject?.id || session.project_id || restoredPptProjectId || null,
         tabTitle: session.title?.slice(0, 24) || '历史会话',
         streamPhase: 'done',
         streamStatus: '已恢复历史会话',
@@ -710,17 +786,19 @@ export default function Studio() {
         inputRefs: [],
       })
 
-      setActiveTool(tool)
-      setActiveProjectId(session.project_id || null)
-      setInput('')
-      setAttachments([])
-      setInputRefs([])
-      setShowArtifactPanel((session.artifacts?.length || 0) > 0 || tool !== 'general')
-      setFollowLatestSlide(false)
-      setPptProgress(null)
-      setStreamPhase('done')
-      setStreamStatus('已恢复历史会话')
-      setProcessLogs(restoredProcessLogs)
+      if (isTargetTabActive()) {
+        setActiveTool(tool)
+        setActiveProjectId(restoredProject?.id || session.project_id || restoredPptProjectId || null)
+        setInput('')
+        setAttachments([])
+        setInputRefs([])
+        setShowArtifactPanel(restoredArtifacts.length > 0 || restoredSlides.length > 0 || tool !== 'general')
+        setFollowLatestSlide(false)
+        setPptProgress(null)
+        setStreamPhase('done')
+        setStreamStatus('已恢复历史会话')
+        setProcessLogs(restoredProcessLogs)
+      }
 
       // tabUiState 也要同步，否则离开再返回当前 tab 时会把旧草稿和旧状态
       // 恢复到刚加载的历史会话上。
@@ -736,9 +814,9 @@ export default function Studio() {
             streamPhase: 'done',
             processLogs: restoredProcessLogs,
             activeTool: tool,
-            activeProjectId: session.project_id || null,
+            activeProjectId: restoredProject?.id || session.project_id || restoredPptProjectId || null,
             toolConfig: prev[restoredTabId]?.toolConfig || {},
-            showArtifactPanel: (session.artifacts?.length || 0) > 0 || tool !== 'general',
+            showArtifactPanel: restoredArtifacts.length > 0 || restoredSlides.length > 0 || tool !== 'general',
             pptProgress: null,
             followLatestSlide: false,
           },
@@ -1155,6 +1233,36 @@ export default function Studio() {
     }
   }
 
+  const applyPptStateToTab = (tabId: string, payload: {
+    project_id?: string
+    title?: string
+    theme?: string
+    slides?: any[]
+    history?: any[]
+    current_index?: number
+  }) => {
+    const tab = usePPTStore.getState().tabs[tabId]
+    if (!tab) return
+    const nextSlides = Array.isArray(payload.slides) ? payload.slides : tab.project?.slides || tab.slides
+    const nextProject = {
+      id: payload.project_id || tab.project?.id || `ppt-${Date.now()}`,
+      title: payload.title || tab.project?.title || '未命名演示文稿',
+      theme: payload.theme || tab.project?.theme || tab.selectedTheme || 'default',
+      slides: nextSlides,
+      history: payload.history || tab.project?.history || [],
+      layout: tab.project?.layout || '16x9' as const,
+      created_at: tab.project?.created_at || new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      owner_id: tab.project?.owner_id || useAuthStore.getState().user?.id,
+    }
+    updateTab(tabId, {
+      activeTool: 'ppt',
+      project: nextProject,
+      slides: nextSlides,
+      currentSlideIndex: typeof payload.current_index === 'number' ? payload.current_index : Math.max(0, nextSlides.length - 1),
+    })
+  }
+
   const applyPptArtifact = (artifact: Artifact, preserveCurrentSlide = false) => {
     applyRealtimePptState({
       project_id: artifact.content?.project_id,
@@ -1214,6 +1322,8 @@ export default function Studio() {
     const pendingAttachments = draftAttachments
     const inferredTool = target?.operation === 'edit_slide' ? 'ppt' : inferToolFromMessage(message, pendingAttachments)
     const requestLoadId = conversationLoadRef.current
+    const requestTabId = activeTabId
+    const isRequestTabActive = () => usePPTStore.getState().activeTabId === requestTabId
     const isCurrentRequest = () => conversationLoadRef.current === requestLoadId
     if (inferredTool !== activeTool) setActiveTool(inferredTool)
     if (!isDirectAction) {
@@ -1233,8 +1343,8 @@ export default function Studio() {
       ...(pendingAttachments.length > 0 ? [`附件：已接收 ${pendingAttachments.length} 个文件`] : []),
     ])
     // 同步到 store tab 状态
-    if (activeTabId) {
-      updateTab(activeTabId, {
+    if (requestTabId) {
+      updateTab(requestTabId, {
         isStreaming: true,
         streamPhase: 'thinking',
         streamStatus: pendingAttachments.length > 0 ? '正在整理消息与附件...' : '正在理解需求...',
@@ -1287,40 +1397,38 @@ export default function Studio() {
         selectedModel,
         pendingAttachments,
         (sseEvent) => {
-          // 选择历史会话后，旧请求即使还有少量缓冲事件到达，也不能
-          // 再写入当前主页面或覆盖刚恢复的会话。
-          if (!isCurrentRequest()) return
+          // SSE 属于发起请求的 tab。切换到其他会话后仍要继续接收，
+          // 只写回 requestTabId，不能因为当前页面切换就丢掉后台任务进度。
           const { event, data } = sseEvent
           switch (event) {
             case 'message':
-              setStreamPhase(data.start ? 'thinking' : 'finishing')
-              setStreamStatus(data.start ? '正在连接模型...' : '正在整理回复...')
+              if (isRequestTabActive()) {
+                setStreamPhase(data.start ? 'thinking' : 'finishing')
+                setStreamStatus(data.start ? '正在连接模型...' : '正在整理回复...')
+              }
               if (data.text) {
                 assistantText += data.text
                 usePPTStore.setState((state) => {
-                  const msgs = [...state.messages]
+                  const targetTab = requestTabId ? state.tabs[requestTabId] : null
+                  if (!targetTab) return state
+                  const msgs = [...targetTab.messages]
                   msgs[msgs.length - 1] = {
                     ...msgs[msgs.length - 1],
                     content: assistantText,
                   }
-                  // 同时更新当前 tab 的 messages，防止 done 事件中 syncFromTab 用旧 tab 数据覆盖全局
-                  const tabId = state.activeTabId
-                  if (tabId && state.tabs[tabId]) {
-                    return {
-                      messages: msgs,
-                      tabs: { ...state.tabs, [tabId]: { ...state.tabs[tabId], messages: msgs } },
-                    }
-                  }
-                  return { messages: msgs }
+                  const nextTab = { ...targetTab, messages: msgs }
+                  return state.activeTabId === requestTabId
+                    ? { messages: msgs, tabs: { ...state.tabs, [requestTabId]: nextTab } }
+                    : { tabs: { ...state.tabs, [requestTabId]: nextTab } }
                 })
               }
               if (data.session_id) {
-                const prevSessionId = sessionId
-                setSessionId(data.session_id)
+                const prevSessionId = usePPTStore.getState().tabs[requestTabId || '']?.sessionId || null
+                if (requestTabId) updateTab(requestTabId, { sessionId: data.session_id })
                 // 更新 tab 标题
-                if (activeTabId && !prevSessionId) {
+                if (requestTabId && !prevSessionId) {
                   const userMsg = message.slice(0, 24)
-                  updateTab(activeTabId, { tabTitle: userMsg, sessionId: data.session_id })
+                  updateTab(requestTabId, { tabTitle: userMsg, sessionId: data.session_id })
                   // 首次获得 session_id 时立即刷新列表，让当前对话出现在侧边栏
                   refreshConversations()
                   refreshProjects()
@@ -1328,50 +1436,71 @@ export default function Studio() {
               }
               if (data.project_id && !project) {
                 pptApi.getProject(data.project_id).then(({ data: proj }) => {
-                  if (!isCurrentRequest()) return
-                  setProject(proj)
-                  setSlides(proj.slides || [])
+                  if (!requestTabId || !usePPTStore.getState().tabs[requestTabId]) return
+                  if (requestTabId) updateTab(requestTabId, { project: proj, slides: proj.slides || [] })
+                  if (isRequestTabActive()) {
+                    setProject(proj)
+                    setSlides(proj.slides || [])
+                  }
                 })
               }
               break
 
             case 'project_update':
-              setActiveTool('ppt')
-              setShowArtifactPanel(true)
-              setStreamPhase('generating')
-              setStreamStatus(
-                typeof data.total_slides === 'number'
-                  ? `已创建项目，准备生成 1 / ${data.total_slides} 页...`
-                  : '已创建项目，正在生成大纲...'
-              )
-              applyRealtimePptState(data)
-              if (data.theme) setSelectedTheme(data.theme)
+              if (requestTabId) {
+                updateTab(requestTabId, { activeTool: 'ppt', isStreaming: true, streamPhase: 'generating', streamStatus: typeof data.total_slides === 'number' ? `已创建项目，准备生成 1 / ${data.total_slides} 页...` : '已创建项目，正在生成大纲...' })
+                applyPptStateToTab(requestTabId, data)
+              }
+              if (isRequestTabActive()) {
+                setActiveTool('ppt')
+                setShowArtifactPanel(true)
+                setStreamPhase('generating')
+                setStreamStatus(
+                  typeof data.total_slides === 'number'
+                    ? `已创建项目，准备生成 1 / ${data.total_slides} 页...`
+                    : '已创建项目，正在生成大纲...'
+                )
+                applyRealtimePptState(data)
+                if (data.theme) setSelectedTheme(data.theme)
+              }
               break
 
             case 'slide_update':
-              setActiveTool('ppt')
-              setShowArtifactPanel(true)
-              setStreamPhase('generating')
-              setStreamStatus(
-                typeof data.slide_count === 'number' && typeof data.total_slides === 'number'
-                  ? `正在生成第 ${data.slide_count} / ${data.total_slides} 页...`
-                  : `正在更新幻灯片${data.slide_count ? `（${data.slide_count} 页）` : ''}...`
-              )
-              if (data.slides) {
-                applyRealtimePptState(data)
+              if (requestTabId) {
+                updateTab(requestTabId, { activeTool: 'ppt', isStreaming: true, streamPhase: 'generating', streamStatus: typeof data.slide_count === 'number' && typeof data.total_slides === 'number' ? `正在生成第 ${data.slide_count} / ${data.total_slides} 页...` : `正在更新幻灯片${data.slide_count ? `（${data.slide_count} 页）` : ''}...` })
+                applyPptStateToTab(requestTabId, data)
+              }
+              if (isRequestTabActive()) {
+                setActiveTool('ppt')
+                setShowArtifactPanel(true)
+                setStreamPhase('generating')
+                setStreamStatus(
+                  typeof data.slide_count === 'number' && typeof data.total_slides === 'number'
+                    ? `正在生成第 ${data.slide_count} / ${data.total_slides} 页...`
+                    : `正在更新幻灯片${data.slide_count ? `（${data.slide_count} 页）` : ''}...`
+                )
+                if (data.slides) {
+                  applyRealtimePptState(data)
+                }
               }
               break
 
             case 'artifact_update':
               if (data.artifact) {
-                upsertArtifact(data.artifact)
-                setActiveTool(inferredTool === 'general' ? 'general' : (data.artifact.tool_kind || inferredTool))
-                setShowArtifactPanel(true)
-                setStreamPhase(data.artifact.status === 'ready' ? 'finishing' : 'generating')
-                setStreamStatus(`已更新产物：${data.artifact.title || '未命名产物'}`)
+                if (requestTabId) {
+                  updateTabArtifacts(requestTabId, [data.artifact], data.artifact.id)
+                  updateTab(requestTabId, { activeTool: data.artifact.tool_kind || inferredTool, isStreaming: true, streamPhase: data.artifact.status === 'ready' ? 'finishing' : 'generating', streamStatus: `已更新产物：${data.artifact.title || '未命名产物'}` })
+                }
+                if (isRequestTabActive()) {
+                  setActiveTool(inferredTool === 'general' ? 'general' : (data.artifact.tool_kind || inferredTool))
+                  setShowArtifactPanel(true)
+                  setStreamPhase(data.artifact.status === 'ready' ? 'finishing' : 'generating')
+                  setStreamStatus(`已更新产物：${data.artifact.title || '未命名产物'}`)
+                }
                 if (data.artifact.kind === 'ppt') {
-                  applyPptArtifact(data.artifact, target?.operation === 'edit_slide')
-                  if (typeof data.artifact.content?.total_slides === 'number') {
+                  if (requestTabId) applyPptStateToTab(requestTabId, data.artifact.content || {})
+                  if (isRequestTabActive()) applyPptArtifact(data.artifact, target?.operation === 'edit_slide')
+                  if (typeof data.artifact.content?.total_slides === 'number' && isRequestTabActive()) {
                     setPptProgress({
                       current: data.artifact.content?.slide_count || data.artifact.content?.slides?.length || 0,
                       total: data.artifact.content.total_slides,
@@ -1418,18 +1547,20 @@ export default function Studio() {
               break
 
             case 'state_update':
-              setStreamPhase(data.phase === 'done' ? 'done' : 'generating')
-              setStreamStatus(data.detail || data.step || '正在处理...')
-              if (activeTabId) updateTab(activeTabId, { streamPhase: data.phase === 'done' ? ('done' as const) : ('generating' as const), streamStatus: data.detail || data.step || '正在处理...' })
-              setProcessLogs((logs) => [...logs.slice(-8), `${data.step || '进度'}：${data.detail || ''}`])
+              if (requestTabId) updateTab(requestTabId, { streamPhase: data.phase === 'done' ? ('done' as const) : ('generating' as const), streamStatus: data.detail || data.step || '正在处理...' })
+              if (isRequestTabActive()) {
+                setStreamPhase(data.phase === 'done' ? 'done' : 'generating')
+                setStreamStatus(data.detail || data.step || '正在处理...')
+                setProcessLogs((logs) => [...logs.slice(-8), `${data.step || '进度'}：${data.detail || ''}`])
+              }
               break
 
             case 'tool_result': {
               const toolName = data.tool || 'unknown'
               const detail = data.error || data.result?.error || data.result?.observation || ''
-              if (data.success) {
+              if (isRequestTabActive() && data.success) {
                 setProcessLogs((logs) => [...logs.slice(-8), `工具 ${toolName} ✓ 完成`])
-              } else {
+              } else if (isRequestTabActive()) {
                 const message = detail ? String(detail).slice(0, 300) : '未返回具体错误'
                 setStreamStatus(`工具 ${toolName} 失败：${message}`)
                 setProcessLogs((logs) => [...logs.slice(-8), `工具 ${toolName} ✗ 失败：${message}`])
@@ -1440,31 +1571,37 @@ export default function Studio() {
             case 'done': {
               playConversationDoneSound()
               const doneArtifacts = Array.isArray(data.new_artifacts) ? data.new_artifacts : []
-              setStreamPhase('done')
-              setStreamStatus(doneArtifacts.length > 0 ? '生成完成' : '回复完成')
-              if (activeTabId) updateTab(activeTabId, { isStreaming: false, streamPhase: 'done', streamStatus: doneArtifacts.length > 0 ? '生成完成' : '回复完成' })
-              if (data.session_id) setSessionId(data.session_id)
+              if (requestTabId) updateTab(requestTabId, { isStreaming: false, streamPhase: 'done', streamStatus: doneArtifacts.length > 0 ? '生成完成' : '回复完成', sessionId: data.session_id || usePPTStore.getState().tabs[requestTabId]?.sessionId || null })
+              if (isRequestTabActive()) {
+                setStreamPhase('done')
+                setStreamStatus(doneArtifacts.length > 0 ? '生成完成' : '回复完成')
+                if (data.session_id) setSessionId(data.session_id)
+              }
               // 确保对话结束后立即刷新列表，让当前对话出现在侧边栏
               refreshConversations()
               refreshProjects()
               if (Array.isArray(data.artifacts)) {
-                data.artifacts.forEach((artifact: Artifact) => upsertArtifact(artifact))
-                if (data.artifacts.length > 0) {
+                if (requestTabId) updateTabArtifacts(requestTabId, data.artifacts, data.artifacts[0]?.id || null)
+                if (isRequestTabActive() && data.artifacts.length > 0) {
                   setShowArtifactPanel(true)
                 }
               }
               const pptArtifact = doneArtifacts.find((item: Artifact) => item.kind === 'ppt')
               if (pptArtifact) {
-                applyPptArtifact(pptArtifact, target?.operation === 'edit_slide')
+                if (requestTabId) applyPptStateToTab(requestTabId, pptArtifact.content || {})
+                if (isRequestTabActive()) applyPptArtifact(pptArtifact, target?.operation === 'edit_slide')
                 const total = pptArtifact.content?.total_slides || pptArtifact.content?.slide_count || pptArtifact.content?.slides?.length || 0
-                if (total > 0) {
+                if (total > 0 && isRequestTabActive()) {
                   setPptProgress({ current: total, total })
                 }
               } else if (data.project_id && !project) {
                 pptApi.getProject(data.project_id).then(({ data: proj }) => {
-                  if (!isCurrentRequest()) return
-                  setProject(proj)
-                  setSlides(proj.slides || [])
+                  if (!requestTabId || !usePPTStore.getState().tabs[requestTabId]) return
+                  if (requestTabId) updateTab(requestTabId, { project: proj, slides: proj.slides || [] })
+                  if (isRequestTabActive()) {
+                    setProject(proj)
+                    setSlides(proj.slides || [])
+                  }
                 })
               }
               break
@@ -1472,24 +1609,24 @@ export default function Studio() {
 
             case 'error':
               console.error('SSE error:', data)
-              setStreamPhase('error')
-              setStreamStatus(data.message || data.detail || '生成失败')
-              setPptProgress(null)
-              if (activeTabId) updateTab(activeTabId, { isStreaming: false, streamPhase: 'error', streamStatus: data.message || data.detail || '生成失败' })
+              if (requestTabId) updateTab(requestTabId, { isStreaming: false, streamPhase: 'error', streamStatus: data.message || data.detail || '生成失败' })
+              if (isRequestTabActive()) {
+                setStreamPhase('error')
+                setStreamStatus(data.message || data.detail || '生成失败')
+                setPptProgress(null)
+              }
               usePPTStore.setState((state) => {
-                const msgs = [...state.messages]
+                const targetTab = requestTabId ? state.tabs[requestTabId] : null
+                if (!targetTab) return state
+                const msgs = [...targetTab.messages]
                 msgs[msgs.length - 1] = {
                   ...msgs[msgs.length - 1],
                   content: `抱歉，生成失败：${data.message || data.detail || '请稍后重试'}`,
                 }
-                const tabId = state.activeTabId
-                if (tabId && state.tabs[tabId]) {
-                  return {
-                    messages: msgs,
-                    tabs: { ...state.tabs, [tabId]: { ...state.tabs[tabId], messages: msgs } },
-                  }
-                }
-                return { messages: msgs }
+                const nextTab = { ...targetTab, messages: msgs }
+                return state.activeTabId === requestTabId
+                  ? { messages: msgs, tabs: { ...state.tabs, [requestTabId]: nextTab } }
+                  : { tabs: { ...state.tabs, [requestTabId]: nextTab } }
               })
               break
           }
@@ -1497,21 +1634,29 @@ export default function Studio() {
         token,
         abortController.signal,
         toolConfig,
-        target
+        target,
+        baseMessage
       )
     } catch (err) {
-      if (!isCurrentRequest()) return
+      // 历史会话切换不会取消后台任务；只有同一 tab 已经开始了新的请求时，
+      // 才丢弃旧请求的收尾状态。
+      if (!isCurrentRequest() && isRequestTabActive()) return
       console.error('Chat error:', err)
       const aborted = err instanceof DOMException && err.name === 'AbortError'
       const errorMessage = err instanceof Error ? err.message : '发生了未知错误'
-      if (!aborted && pendingAttachments.length > 0) {
+      if (isRequestTabActive() && !aborted && pendingAttachments.length > 0) {
         setAttachments(pendingAttachments)
       }
-      setStreamPhase(aborted ? 'idle' : 'error')
-      setStreamStatus(aborted ? '已停止生成' : errorMessage)
-      setPptProgress(null)
+      if (isRequestTabActive()) {
+        setStreamPhase(aborted ? 'idle' : 'error')
+        setStreamStatus(aborted ? '已停止生成' : errorMessage)
+        setPptProgress(null)
+      }
+      if (requestTabId) updateTab(requestTabId, { isStreaming: false, streamPhase: aborted ? 'idle' : 'error', streamStatus: aborted ? '已停止生成' : errorMessage })
       usePPTStore.setState((state) => {
-        const msgs = [...state.messages]
+        const targetTab = requestTabId ? state.tabs[requestTabId] : null
+        if (!targetTab) return state
+        const msgs = [...targetTab.messages]
         msgs[msgs.length - 1] = {
           ...msgs[msgs.length - 1],
           content: aborted
@@ -1520,25 +1665,23 @@ export default function Studio() {
             ? '登录状态已失效，请重新登录后再试。'
             : `抱歉，发生了错误：${errorMessage}`,
         }
-        const tabId = state.activeTabId
-        if (tabId && state.tabs[tabId]) {
-          return {
-            messages: msgs,
-            tabs: { ...state.tabs, [tabId]: { ...state.tabs[tabId], messages: msgs } },
-          }
-        }
-        return { messages: msgs }
+        const nextTab = { ...targetTab, messages: msgs }
+        return state.activeTabId === requestTabId
+          ? { messages: msgs, tabs: { ...state.tabs, [requestTabId]: nextTab } }
+          : { tabs: { ...state.tabs, [requestTabId]: nextTab } }
       })
     } finally {
-      if (!isCurrentRequest()) {
+      if (!isCurrentRequest() && isRequestTabActive()) {
         if (abortRef.current === abortController) abortRef.current = null
         return
       }
-      setStreaming(false)
-      abortRef.current = null
+      if (isRequestTabActive()) {
+        setStreaming(false)
+        abortRef.current = null
+      }
       refreshConversations()
       refreshProjects()
-      if (activeTabId) updateTab(activeTabId, { isStreaming: false })
+      if (requestTabId) updateTab(requestTabId, { isStreaming: false })
     }
   }
 

@@ -77,6 +77,7 @@ interface PPTState {
 
   // 批量设置（切换 tab 时恢复状态）
   restoreState: (state: Partial<ConversationState>) => void;
+  restoreTabState: (tabId: string, state: Partial<ConversationState>) => void;
 }
 
 function createInitialTabState(tabId: string, overrides?: Partial<ConversationState>): TabState {
@@ -384,6 +385,19 @@ export const usePPTStore = create<PPTState>((set, get) => ({
       const tab = state.tabs[tabId];
       if (!tab) return partial;
       return { tabs: { ...state.tabs, [tabId]: { ...tab, ...partial } }, ...partial };
+    });
+  },
+
+  restoreTabState: (tabId, partial) => {
+    set((state) => {
+      const tab = state.tabs[tabId];
+      if (!tab) return state;
+      const nextTab = { ...tab, ...partial };
+      const nextState: Partial<PPTState> = {
+        tabs: { ...state.tabs, [tabId]: nextTab },
+      };
+      if (state.activeTabId === tabId) Object.assign(nextState, syncFromTab({ ...state, tabs: { ...state.tabs, [tabId]: nextTab } }, tabId));
+      return nextState;
     });
   },
 

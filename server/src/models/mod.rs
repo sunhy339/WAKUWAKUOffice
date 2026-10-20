@@ -221,6 +221,9 @@ pub struct PersistedChatMessage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatRequest {
     pub message: String,
+    /// 用户在界面实际看到的原始输入；message 可能还包含附件/产物引用上下文。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_message: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub project_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

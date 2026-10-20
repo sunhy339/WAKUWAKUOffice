@@ -168,8 +168,16 @@ export function ConversationSidebar({
   // 合并本地 tab 和 API 会话
   // localTabs 中已有 sessionId 的会去重匹配 conversations 中的已保存会话
   const savedSessionIds = new Set(conversations.map((c) => c.id))
+  // 正在执行的本地 tab 必须保留在“任务空间”中。即使后端已经创建了
+  // session，也不能马上把它去重掉，否则点击左侧会话只能重新加载历史快照，
+  // 无法切回仍在工作的实时任务。
+  const liveSessionIds = new Set(
+    localTabs
+      .filter((t) => t.isStreaming && t.sessionId)
+      .map((t) => t.sessionId as string),
+  )
   const localOnlyTabs: SidebarTaskItem[] = localTabs
-    .filter((t) => !t.sessionId || !savedSessionIds.has(t.sessionId))
+    .filter((t) => t.isStreaming || !t.sessionId || !savedSessionIds.has(t.sessionId))
     .map((t) => ({
       ...t,
       title: t.title || '新对话',
@@ -199,6 +207,7 @@ export function ConversationSidebar({
   }
 
   // 当前对话排在最前面
+  const savedConversations = conversations.filter((item) => !liveSessionIds.has(item.id))
   const currentConversations = shouldShowDraftConversation
     ? [{
         id: 'current',
@@ -208,8 +217,8 @@ export function ConversationSidebar({
         updated_at: latestMessage?.timestamp || new Date().toISOString(),
         message_count: messages.length,
         project_id: activeProjectId || undefined,
-      } as ConversationRecord, ...conversations.filter((item) => item.id !== 'current')]
-    : conversations
+      } as ConversationRecord, ...savedConversations.filter((item) => item.id !== 'current')]
+    : savedConversations
 
   // 对正在 streaming 的已保存会话，更新 updated_at 到当前时间，使其排在最前面
   const boostedConversations = currentConversations.map((item) => {

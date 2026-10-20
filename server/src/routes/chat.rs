@@ -981,7 +981,10 @@ async fn chat_stream(
     // 保存用户消息
     let user_msg = ChatMessage {
         role: "user".into(),
-        content: req.message.clone(),
+        content: req
+            .display_message
+            .clone()
+            .unwrap_or_else(|| req.message.clone()),
         tool_calls: None,
         tool_call_id: None,
     };

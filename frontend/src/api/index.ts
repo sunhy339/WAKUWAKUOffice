@@ -177,7 +177,8 @@ export const chatApi = {
     token: string,
     signal?: AbortSignal,
     toolConfig?: Record<string, any>,
-    target?: ChatTargetContext
+    target?: ChatTargetContext,
+    displayMessage?: string,
   ) => {
     const response = await fetch(`${API_BASE}/chat/stream`, {
       method: 'POST',
@@ -195,6 +196,7 @@ export const chatApi = {
         attachments,
         tool_config: toolConfig,
         target,
+        display_message: displayMessage || message,
       }),
       signal,
     });

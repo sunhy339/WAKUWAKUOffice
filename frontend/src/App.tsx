@@ -33,12 +33,16 @@ function WorkspaceRoute() {
   return (
     <>
       <div className={isFilesPage ? 'hidden' : 'contents'}>
-        <Studio />
+        <Suspense fallback={<Loading />}>
+          <Studio />
+        </Suspense>
       </div>
       <div className={isFilesPage ? 'contents' : 'hidden'}>
-        <AppLayout>
-          <FilesPage />
-        </AppLayout>
+        <Suspense fallback={<Loading />}>
+          <AppLayout>
+            <FilesPage />
+          </AppLayout>
+        </Suspense>
       </div>
     </>
   )

@@ -219,7 +219,9 @@ export default function Studio() {
 
   const activeArtifact = artifacts.find((artifact) => artifact.id === activeArtifactId) || null
   const messagesEndRef = useRef<HTMLDivElement>(null)
-  const abortRef = useRef<AbortController | null>(null)
+  // 每个 Tab 都可能有独立的后台 SSE 请求。取消操作必须按 Tab 定位，
+  // 不能让当前页面的“停止”误中止另一个正在生成的后台任务。
+  const abortControllersRef = useRef<Record<string, AbortController>>({})
   // 每个生成请求都有独立的所有权。历史会话加载、切换文件页或切换 Tab
   // 都不应使后台任务失效；只有同一 Tab 开始了新的请求，旧请求的事件才应被丢弃。
   const requestCounterRef = useRef(0)
@@ -631,7 +633,7 @@ export default function Studio() {
   const handleSelectProject = async (projectId: string) => {
     // 如果正在 streaming，先中止
     if (isStreaming) {
-      abortRef.current?.abort()
+      if (activeTabId) abortControllersRef.current[activeTabId]?.abort()
       setStreaming(false)
       setStreamPhase('idle')
       setStreamStatus('已停止生成')
@@ -660,7 +662,7 @@ export default function Studio() {
     conversationLoadRef.current += 1
     // 如果正在 streaming，先中止当前请求再切换
     if (isStreaming) {
-      abortRef.current?.abort()
+      if (activeTabId) abortControllersRef.current[activeTabId]?.abort()
       setStreaming(false)
       setStreamPhase('idle')
       setStreamStatus('已停止生成')
@@ -1405,7 +1407,7 @@ export default function Studio() {
       })
     }
     const abortController = new AbortController()
-    abortRef.current = abortController
+    if (requestTabId) abortControllersRef.current[requestTabId] = abortController
 
     if (isRetry) {
       usePPTStore.setState((state) => {
@@ -1763,7 +1765,9 @@ export default function Studio() {
       if (isRequestTabActive()) {
         setStreaming(false)
       }
-      if (abortRef.current === abortController) abortRef.current = null
+      if (requestTabId && abortControllersRef.current[requestTabId] === abortController) {
+        delete abortControllersRef.current[requestTabId]
+      }
       refreshConversations()
       refreshProjects()
       if (requestTabId) updateTab(requestTabId, { isStreaming: false })
@@ -1806,7 +1810,7 @@ export default function Studio() {
   }
 
   const handleStop = () => {
-    abortRef.current?.abort()
+    if (activeTabId) abortControllersRef.current[activeTabId]?.abort()
     setStreaming(false)
     setStreamPhase('idle')
     setStreamStatus('已停止生成')

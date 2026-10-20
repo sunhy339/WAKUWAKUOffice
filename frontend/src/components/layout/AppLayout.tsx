@@ -1,4 +1,5 @@
 import { NavLink, Outlet, useNavigate } from 'react-router-dom'
+import type { ReactNode } from 'react'
 import {
   Bell, Files, LogOut, Sparkles
 } from 'lucide-react'
@@ -11,7 +12,7 @@ const NAV_ITEMS = [
   { to: '/files', label: '我的文件', icon: Files },
 ]
 
-export function AppLayout() {
+export function AppLayout({ children }: { children?: ReactNode }) {
   const navigate = useNavigate()
   const { user, logout } = useAuthStore()
 
@@ -147,7 +148,7 @@ export function AppLayout() {
 
         <main className="relative z-10 flex-1">
           <div className="mx-auto flex min-h-[calc(100vh-64px)] w-full max-w-[1440px] flex-col px-4 py-4 lg:px-6 lg:py-6">
-            <Outlet />
+            {children ?? <Outlet />}
           </div>
         </main>
       </div>

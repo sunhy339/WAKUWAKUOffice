@@ -662,7 +662,13 @@ export default function Studio() {
     conversationLoadRef.current += 1
     // 如果正在 streaming，先中止当前请求再切换
     if (isStreaming) {
-      if (activeTabId) abortControllersRef.current[activeTabId]?.abort()
+      if (activeTabId) {
+        // 新对话会复用当前 Tab 并清空消息；先移除请求所有权，
+        // 避免旧请求的 AbortError 收尾把错误消息写回新对话。
+        delete requestOwnerRef.current[activeTabId]
+        abortControllersRef.current[activeTabId]?.abort()
+        delete abortControllersRef.current[activeTabId]
+      }
       setStreaming(false)
       setStreamPhase('idle')
       setStreamStatus('已停止生成')

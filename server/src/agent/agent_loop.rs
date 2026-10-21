@@ -56,8 +56,8 @@ pub struct AgentConfig {
     pub max_turns: usize,
     pub system_prompt: String,
     pub allowed_tools: Option<Vec<String>>,
-    /// 图片专用请求中，image_prompt 已经返回完整的多风格产物后直接收尾。
-    /// 该工具本身一次会生成多个变体，继续让模型追问同一个工具会造成重复出图。
+    /// 图片专用请求中，image_prompt 已经按用户指定数量返回完整图片产物后直接收尾。
+    /// 继续让模型追问同一个工具会造成重复出图。
     pub finish_after_artifact: bool,
 }
 
@@ -485,7 +485,7 @@ pub async fn run_agent_loop(
                     }
                 }
 
-                // image_prompt 一次已经返回 3 个风格变体。图片专用请求不再把
+                // image_prompt 一次已经按用户指定数量返回图片。图片专用请求不再把
                 // 同一个工具结果交给模型继续追问，避免重复发起第二轮长耗时生图。
                 if config.finish_after_artifact
                     && tool_name == "image_prompt"

@@ -50,6 +50,46 @@ struct ImageOutputSpec {
 const DEFAULT_IMAGE_VARIANT_COUNT: usize = 1;
 const MAX_IMAGE_VARIANT_COUNT: usize = 4;
 
+fn has_explicit_multiple_style_request(topic: &str, styles: &[String]) -> bool {
+    if styles.len() < 2 {
+        return false;
+    }
+
+    let normalized_topic = topic
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect::<String>()
+        .to_lowercase();
+    let explicit_markers = [
+        "两种",
+        "三种",
+        "多种",
+        "几种",
+        "多套",
+        "分别",
+        "风格对比",
+        "风格方向",
+        "风格方案",
+    ];
+    if explicit_markers
+        .iter()
+        .any(|marker| normalized_topic.contains(marker))
+    {
+        return true;
+    }
+
+    // 允许用户直接写“写实、插画、3D”，但不要把模型自动补出的
+    // 风格列表当成多张图片请求。
+    let mentioned_styles = styles
+        .iter()
+        .filter(|style| {
+            let style = style.trim().to_lowercase();
+            !style.is_empty() && normalized_topic.contains(&style)
+        })
+        .count();
+    mentioned_styles >= 2
+}
+
 fn infer_image_variant_count(
     topic: &str,
     styles: &[String],
@@ -97,10 +137,14 @@ fn infer_image_variant_count(
         return *count;
     }
 
-    if styles.len() > 1 {
+    if has_explicit_multiple_style_request(topic, styles) {
         return styles.len().min(MAX_IMAGE_VARIANT_COUNT);
     }
 
+    // styles 来自 LLM 的工具参数，不能单独作为“用户要求多张”的依据。
+    // 旧逻辑会把模型自动补出的“写实 / 插画 / 3D”误判成三张图片，
+    // 即使用户只说“生成一张小猫咪”。多种风格必须由用户明确指定数量，
+    // 或通过 count 显式指定；默认始终只生成一张。
     DEFAULT_IMAGE_VARIANT_COUNT
 }
 
@@ -409,7 +453,7 @@ impl OfficeTool for ImagePromptTool {
             )
         } else {
             format!(
-                "需求：{topic}\n场景指导：{scene_guide}\n输出尺寸建议：{}，宽高比 {}\n生成模式：{}\n{reference_guidance}指定风格：{}\n请严格按这些风格输出 {} 套可直接出图的 Agnes 提示词，不要额外增加数量。",
+                "需求：{topic}\n场景指导：{scene_guide}\n输出尺寸建议：{}，宽高比 {}\n生成模式：{}\n{reference_guidance}指定风格：{}\n请严格按这些风格输出 {} 套可直接出图的 Agnes 提示词，不要额外增加数量；如果只要求 1 套，只选择最合适的一种风格。",
                 output_spec.size,
                 output_spec.ratio,
                 if wants_image_to_image { "图生图，基于用户参考图修改或再创作" } else { "文生图" },
@@ -760,7 +804,15 @@ mod tests {
         assert_eq!(infer_image_variant_count("生成图片", &[], Some(2)), 2);
         assert_eq!(
             infer_image_variant_count("生成图片", &["写实".into(), "插画".into()], None),
-            2
+            1
+        );
+        assert_eq!(
+            infer_image_variant_count(
+                "生成写实、插画和 3D 三种风格的小猫咪",
+                &["写实".into(), "插画".into(), "3D".into()],
+                None,
+            ),
+            3
         );
         assert_eq!(infer_image_variant_count("生成十张图片", &[], None), 1);
     }

@@ -550,11 +550,35 @@ pub async fn get_persisted_messages(
 }
 
 pub async fn delete(pool: &DbPool, session_id: &str, owner_id: &str) -> AppResult<bool> {
+    // 不依赖数据库是否开启外键级联：MySQL 旧表结构没有声明级联约束，
+    // 直接删除 sessions 会留下消息和产物孤儿记录。先校验所有权，再在
+    // 同一事务内清理子表，保证删除结果与 UI 列表保持一致。
+    let mut tx = pool.begin().await?;
+    let session = sqlx::query("SELECT id FROM sessions WHERE id = ? AND owner_id = ?")
+        .bind(session_id)
+        .bind(owner_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+    if session.is_none() {
+        tx.rollback().await?;
+        return Ok(false);
+    }
+
+    sqlx::query("DELETE FROM messages WHERE session_id = ?")
+        .bind(session_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM session_artifacts WHERE session_id = ?")
+        .bind(session_id)
+        .execute(&mut *tx)
+        .await?;
     let result = sqlx::query("DELETE FROM sessions WHERE id = ? AND owner_id = ?")
         .bind(session_id)
         .bind(owner_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
+    tx.commit().await?;
     Ok(result.rows_affected() > 0)
 }
 

@@ -62,6 +62,81 @@ fn infer_diagram_scene(topic: &str) -> &'static str {
     }
 }
 
+/// 模型无法输出 draw.io XML 时，兼容提取它返回的 Mermaid 代码。
+/// Mermaid 仍然是可渲染、可复制的图表源文件，不应被当作完全失败处理。
+pub fn extract_mermaid_source(content: &str) -> Option<String> {
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let source = if let Some(open) = trimmed.find("```") {
+        let after_open = &trimmed[open + 3..];
+        let body_start = after_open.find('\n').map(|index| index + 1).unwrap_or(0);
+        let body = &after_open[body_start..];
+        body.split("```").next().unwrap_or(body).trim()
+    } else {
+        trimmed
+    };
+
+    let first = source.lines().position(|line| {
+        let normalized = line.trim().to_ascii_lowercase();
+        [
+            "flowchart td",
+            "flowchart tb",
+            "flowchart bt",
+            "flowchart rl",
+            "flowchart lr",
+            "graph td",
+            "graph tb",
+            "graph bt",
+            "graph rl",
+            "graph lr",
+        ]
+        .iter()
+        .any(|prefix| normalized.starts_with(prefix))
+    })?;
+    let normalized = source
+        .lines()
+        .skip(first)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string();
+    if normalized.is_empty() {
+        return None;
+    }
+    Some(normalized)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extract_mermaid_source;
+
+    #[test]
+    fn extracts_fenced_mermaid_after_explanation() {
+        let content =
+            "暂时无法直接渲染，代码如下：\n```less\nflowchart TD\n    A[开始] --> B[结束]\n```";
+        assert_eq!(
+            extract_mermaid_source(content).as_deref(),
+            Some("flowchart TD\n    A[开始] --> B[结束]")
+        );
+    }
+
+    #[test]
+    fn extracts_unfenced_mermaid() {
+        assert_eq!(
+            extract_mermaid_source("flowchart LR\n  A --> B").as_deref(),
+            Some("flowchart LR\n  A --> B")
+        );
+    }
+
+    #[test]
+    fn ignores_non_mermaid_content() {
+        assert!(extract_mermaid_source("这里没有可渲染图表").is_none());
+    }
+}
+
 #[async_trait]
 impl OfficeTool for DrawioGenerateTool {
     fn name(&self) -> &str {
@@ -173,7 +248,25 @@ XML 格式示例：
             .to_string();
 
         if !xml.contains("<mxGraphModel") && !xml.contains("<mxfile") {
-            return ToolResult::err("图表生成失败：模型未返回有效的 draw.io XML");
+            if let Some(mermaid) = extract_mermaid_source(&content) {
+                return ToolResult::ok(
+                    format!("已生成《{topic}》{diagram_type}图表（Mermaid 可视化兜底）"),
+                    vec![ToolArtifact {
+                        kind: "drawio".into(),
+                        title: topic.to_string(),
+                        content: json!({
+                            "type": "mermaid",
+                            "title": topic,
+                            "diagram_type": diagram_type,
+                            "format": "mermaid",
+                            "mermaid": mermaid,
+                        }),
+                    }],
+                );
+            }
+            return ToolResult::err(
+                "图表生成失败：模型未返回有效的 draw.io XML 或 Mermaid 图表代码",
+            );
         }
 
         ToolResult::ok(

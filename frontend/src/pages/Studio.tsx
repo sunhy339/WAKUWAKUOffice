@@ -14,6 +14,7 @@ import { AlertCircle, CheckCircle2, Info, Play, X, PanelRightClose, PanelRight, 
 import type { AppSettings, Artifact, ChatAttachment, ChatTargetContext, ChatStreamPhase, ConversationRecord, InputRef, LLMProfile, PersistedSession, ProjectMeta, SessionProcessEvent, ToolKind, ToolConfigMap } from '@/types'
 import { extractArtifactSummary } from '@/lib/artifact-summary'
 import { chatModelsFromProfiles, supportsChatModel } from '@/lib/model-capabilities'
+import { extractMermaidSource } from '@/lib/mermaid'
 const LOGO_URL = '/logo.png'
 
 type ToastTone = 'success' | 'error' | 'info'
@@ -235,6 +236,8 @@ export default function Studio() {
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false)
   const [toast, setToast] = useState<ToastState | null>(null)
   const [newProjectDialogOpen, setNewProjectDialogOpen] = useState(false)
+  // 删除成功后保留本地 tombstone，避免并发中的旧列表请求把已删除会话重新写回。
+  const deletedConversationIdsRef = useRef<Set<string>>(new Set())
   const [newProjectTitle, setNewProjectTitle] = useState('')
   // 每个 tab 的本地 UI 状态（与 store 中的对话状态分离）
   const [tabUiState, setTabUiState] = useState<Record<string, { input: string; attachments: ChatAttachment[]; inputRefs: InputRef[]; streamStatus: string; streamPhase: typeof streamPhase; processLogs: string[]; activeTool: ToolKind; activeProjectId: string | null; selectedTheme: string; toolConfig: ToolConfigMap; showArtifactPanel: boolean; pptProgress: { current: number; total: number } | null; followLatestSlide: boolean }>>({})
@@ -365,7 +368,7 @@ export default function Studio() {
         project_id: item.project_id,
       }))
       console.log('[refreshConversations] parsed rows:', rows.length, rows.slice(0, 2))
-      setConversations(rows)
+      setConversations(rows.filter((item) => !deletedConversationIdsRef.current.has(item.id)))
     } catch (err) {
       console.error('[refreshConversations] error:', err)
     }
@@ -792,7 +795,29 @@ export default function Studio() {
       if (!isLatestLoad()) return
 
       const session = res.data as PersistedSession
-      const restoredArtifacts = session.artifacts || []
+      const restoredArtifacts = [...(session.artifacts || [])]
+      // 兼容旧会话：早期 draw.io 服务失败时只把 Mermaid 源码写进了
+      // assistant 消息，没有保存 Artifact。恢复时补出临时预览产物，既不
+      // 改写历史事实，也能让用户继续看到之前已经生成的流程图。
+      if (!restoredArtifacts.some((artifact) => artifact.kind === 'drawio')) {
+        const legacyMermaid = [...(session.messages || [])]
+          .reverse()
+          .find((message) => message.role === 'assistant')
+        const mermaidSource = legacyMermaid ? extractMermaidSource(legacyMermaid.content) : null
+        if (mermaidSource) {
+          restoredArtifacts.push({
+            id: `legacy-mermaid-${session.id}`,
+            kind: 'drawio',
+            tool_kind: 'drawio',
+            title: session.title || '流程图',
+            status: 'ready',
+            content: { type: 'mermaid', format: 'mermaid', mermaid: mermaidSource },
+            version: 1,
+            created_at: session.updated_at,
+            updated_at: session.updated_at,
+          })
+        }
+      }
       const pptArtifact = restoredArtifacts.find((artifact) => artifact.kind === 'ppt')
       const tool = session.tool_kind || pptArtifact?.tool_kind || 'general'
 
@@ -863,7 +888,7 @@ export default function Studio() {
         currentSlideIndex: 0,
         messages: restoredMessages,
         artifacts: restoredArtifacts,
-        activeArtifactId: restoredArtifacts[0]?.id || null,
+        activeArtifactId: restoredArtifacts.find((artifact) => artifact.content?.mermaid)?.id || restoredArtifacts[0]?.id || null,
         isGenerating: false,
         isStreaming: false,
         sessionId: session.id,
@@ -947,13 +972,53 @@ export default function Studio() {
 
   const handleDeleteConversation = async (id: string) => {
     if (!confirm('确认删除该对话？此操作不可恢复。')) return
+    // 让正在进行的历史恢复立即失效，避免删除响应与较早的 getSession
+    // 竞态，导致已删除会话又被写回当前 Tab。
+    conversationLoadRef.current += 1
     try {
       await sessionApi.deleteSession(id)
+      deletedConversationIdsRef.current.add(id)
+      // 服务端删除后同步清理本地 Tab。否则已删除的历史会话会因为
+      // localTabs 仍然持有 sessionId，又以“任务空间”项目重新出现。
+      const matchingTabs = Object.values(usePPTStore.getState().tabs).filter((tab) => tab.sessionId === id)
+      for (const tab of matchingTabs) {
+        const isWorking = tab.isStreaming && tab.streamPhase !== 'done' && tab.streamPhase !== 'error' && tab.streamPhase !== 'idle'
+        if (isWorking) continue
+        if (tab.tabId === activeTabId) {
+          reset()
+          updateTab(tab.tabId, { tabTitle: '新对话', sessionId: null, activeTool: 'general', streamStatus: '空闲', streamPhase: 'idle', processLogs: [] })
+        } else {
+          closeTab(tab.tabId)
+        }
+      }
+      setTabUiState((prev) => {
+        const next = { ...prev }
+        for (const tab of matchingTabs) {
+          if (tab.tabId !== activeTabId) delete next[tab.tabId]
+          else if (next[tab.tabId]) next[tab.tabId] = { ...next[tab.tabId], input: '', attachments: [], inputRefs: [], streamStatus: '空闲', streamPhase: 'idle', processLogs: [], activeTool: 'general', activeProjectId: null, toolConfig: {}, showArtifactPanel: false, pptProgress: null, followLatestSlide: true }
+        }
+        return next
+      })
+      // 先做乐观移除，避免接口成功后到下一次刷新之间仍能点击到旧条目。
+      setConversations((items) => items.filter((item) => item.id !== id))
       if (sessionId === id) {
         reset()
         setSearchParams({}, { replace: true })
+        setInput('')
+        setAttachments([])
+        setInputRefs([])
+        setActiveTool('general')
+        setActiveProjectId(null)
+        setStreamStatus('空闲')
+        setStreamPhase('idle')
+        setProcessLogs([])
+        setShowArtifactPanel(false)
+        setPptProgress(null)
+        setFollowLatestSlide(true)
       }
-      refreshConversations()
+      await refreshConversations()
+      // 防止删除请求前已经发出的列表刷新响应把旧条目重新写回来。
+      setConversations((items) => items.filter((item) => item.id !== id))
       refreshProjects()
     } catch (err) {
       console.error('Delete conversation error:', err)
@@ -2025,6 +2090,14 @@ export default function Studio() {
   const handleExportDrawio = async (artifact: Artifact) => {
     try {
       const xml = artifact.content?.xml
+      const mermaid = artifact.content?.mermaid
+      if (!xml && mermaid) {
+        const blob = new Blob([mermaid], { type: 'text/vnd.mermaid;charset=utf-8' })
+        const filename = safeFilename(artifact.title, 'diagram', '.mmd')
+        if (!autoSavedArtifactIdsRef.current.has(artifact.id)) await saveGeneratedBlob(blob, filename, artifact)
+        downloadBlob(blob, filename)
+        return
+      }
       if (!xml) {
         showToast('当前 draw.io 文件暂无可下载内容', 'info')
         return

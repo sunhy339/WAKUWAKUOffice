@@ -201,6 +201,27 @@ fn build_summary_markdown_artifact(summary: &str, tool_kind: Option<&str>) -> Ar
     }
 }
 
+fn build_summary_mermaid_artifact(summary: &str) -> Option<Artifact> {
+    let mermaid = crate::agent::tools::drawio_generate::extract_mermaid_source(summary)?;
+    let now = chrono::Utc::now().to_rfc3339();
+    Some(Artifact {
+        id: uuid::Uuid::new_v4().to_string(),
+        kind: "drawio".into(),
+        tool_kind: "drawio".into(),
+        title: "流程图结果".into(),
+        status: "ready".into(),
+        content: serde_json::json!({
+            "type": "mermaid",
+            "format": "mermaid",
+            "mermaid": mermaid,
+            "source": "assistant_summary_fallback",
+        }),
+        version: 1,
+        created_at: now.clone(),
+        updated_at: now,
+    })
+}
+
 fn format_attachment_context(attachments: &[ChatAttachment]) -> String {
     if attachments.is_empty() {
         return String::new();
@@ -521,7 +542,7 @@ fn infer_file_type(name: &str, mime_type: &str) -> String {
         "ppt" | "pptx" => "ppt".into(),
         "doc" | "docx" | "md" | "markdown" | "txt" | "pdf" => "doc".into(),
         "xls" | "xlsx" | "csv" | "tsv" => "excel".into(),
-        "drawio" | "xml" => "drawio".into(),
+        "drawio" | "xml" | "mmd" | "mermaid" => "drawio".into(),
         "png" | "jpg" | "jpeg" | "webp" | "gif" | "svg" => "image".into(),
         "mp4" | "webm" | "mov" => "video".into(),
         _ if mime_type.starts_with("image/") => "image".into(),
@@ -898,6 +919,22 @@ async fn save_generated_artifact_to_files(pool: &DbPool, owner_id: &str, artifac
                     &filename,
                     xml.as_bytes(),
                     "application/xml",
+                    &description,
+                    metadata,
+                )
+                .await;
+            } else if let Some(mermaid) = artifact
+                .content
+                .get("mermaid")
+                .and_then(|value| value.as_str())
+            {
+                let filename = artifact_filename(artifact, "diagram", ".mmd");
+                let _ = save_file_bytes(
+                    pool,
+                    owner_id,
+                    &filename,
+                    mermaid.as_bytes(),
+                    "text/vnd.mermaid",
                     &description,
                     metadata,
                 )
@@ -1366,6 +1403,13 @@ async fn chat_stream(
                         && looks_like_markdown_document(&summary)
                     {
                         collected_artifacts.push(build_summary_markdown_artifact(&summary, requested_tool_kind.as_deref()));
+                    }
+                    if collected_artifacts.is_empty()
+                        && requested_tool_kind.as_deref() == Some("drawio")
+                    {
+                        if let Some(artifact) = build_summary_mermaid_artifact(&summary) {
+                            collected_artifacts.push(artifact);
+                        }
                     }
                     let session_artifacts = merge_session_artifacts(
                         existing_artifacts_for_save.clone(),

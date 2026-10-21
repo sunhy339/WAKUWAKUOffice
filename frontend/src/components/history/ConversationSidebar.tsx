@@ -461,7 +461,7 @@ export function ConversationSidebar({
           </div>
         </button>
 
-        {item.id !== 'current' && hovered === item.id && (
+        {item.id !== 'current' && !isLocalTab && hovered === item.id && (
           <div className="absolute right-2 top-2 flex items-center gap-1 rounded-full bg-[#f7f2e8]/95 p-0.5 shadow-sm ring-1 ring-black/[0.06]" onClick={(e) => e.stopPropagation()}>
             {onRenameConversation && (
               <button type="button" onClick={() => handleRenameConversation(item)} className="rounded-full p-1.5 text-surface-400 hover:bg-white hover:text-surface-800" title="修改标题">

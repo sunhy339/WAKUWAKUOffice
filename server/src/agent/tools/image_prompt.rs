@@ -47,6 +47,63 @@ struct ImageOutputSpec {
     ratio: &'static str,
 }
 
+const DEFAULT_IMAGE_VARIANT_COUNT: usize = 1;
+const MAX_IMAGE_VARIANT_COUNT: usize = 4;
+
+fn infer_image_variant_count(
+    topic: &str,
+    styles: &[String],
+    requested_count: Option<usize>,
+) -> usize {
+    if let Some(count) = requested_count.filter(|count| *count > 0) {
+        return count.min(MAX_IMAGE_VARIANT_COUNT);
+    }
+
+    let normalized = topic
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect::<String>();
+    let explicit_markers = [
+        ("一张", 1),
+        ("一幅", 1),
+        ("一副", 1),
+        ("单张", 1),
+        ("两张", 2),
+        ("两幅", 2),
+        ("两种", 2),
+        ("两套", 2),
+        ("两版", 2),
+        ("三张", 3),
+        ("三幅", 3),
+        ("三种", 3),
+        ("三套", 3),
+        ("三版", 3),
+        ("四张", 4),
+        ("四幅", 4),
+        ("四种", 4),
+        ("四套", 4),
+        ("四版", 4),
+        ("1张", 1),
+        ("2张", 2),
+        ("3张", 3),
+        ("4张", 4),
+        ("多张", 3),
+        ("多种", 3),
+    ];
+    if let Some((_, count)) = explicit_markers
+        .iter()
+        .find(|(marker, _)| normalized.contains(marker))
+    {
+        return *count;
+    }
+
+    if styles.len() > 1 {
+        return styles.len().min(MAX_IMAGE_VARIANT_COUNT);
+    }
+
+    DEFAULT_IMAGE_VARIANT_COUNT
+}
+
 fn collect_image_inputs(ctx: &ToolContext, input: &serde_json::Value) -> Vec<String> {
     let mut images = input
         .get("image_urls")
@@ -245,6 +302,12 @@ impl OfficeTool for ImagePromptTool {
                     "type": "string",
                     "description": "生成模式：text_to_image 或 image_to_image。用户上传图片并要求改图/换风格/基于参考图生成时使用 image_to_image"
                 },
+                "count": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 4,
+                    "description": "需要生成的图片数量；用户明确要求几张时填写，否则默认 1 张"
+                },
                 "image_url": { "type": "string", "description": "图生图参考图片 URL 或 data URL，可选；不传时自动使用本轮上传图片" },
                 "image_urls": {
                     "type": "array",
@@ -274,6 +337,11 @@ impl OfficeTool for ImagePromptTool {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
+        let requested_count = input
+            .get("count")
+            .and_then(|value| value.as_u64())
+            .map(|value| value as usize);
+        let variant_count = infer_image_variant_count(topic, &styles, requested_count);
 
         if topic.is_empty() {
             return ToolResult::err("topic 不能为空");
@@ -314,7 +382,8 @@ impl OfficeTool for ImagePromptTool {
   ]
 }
 要求：
-- 默认输出 3 种风格
+- 严格按照用户要求输出指定数量的提示词；如果用户没有指定数量，只输出 1 套
+- 如果用户明确指定多种风格，则每种风格输出 1 套；不要为了“丰富选择”自动增加数量
 - 提示词必须清晰包含：主要主体、背景环境、重要次要细节、风格与光照、构图约束
 - 文生图遵循：[主体] + [场景/环境] + [风格] + [光照] + [构图] + [质量要求]
 - 图生图遵循：[修改要求] + [新风格/新场景] + [添加/移除的元素] + [需要保留的元素]
@@ -332,18 +401,20 @@ impl OfficeTool for ImagePromptTool {
 
         let user_prompt = if styles.is_empty() {
             format!(
-                "需求：{topic}\n场景指导：{scene_guide}\n输出尺寸建议：{}，宽高比 {}\n生成模式：{}\n{reference_guidance}请给出 3 套差异明确且可直接出图的 Agnes 提示词。",
-                output_spec.size,
-                output_spec.ratio,
-                if wants_image_to_image { "图生图，基于用户参考图修改或再创作" } else { "文生图" }
-            )
-        } else {
-            format!(
-                "需求：{topic}\n场景指导：{scene_guide}\n输出尺寸建议：{}，宽高比 {}\n生成模式：{}\n{reference_guidance}指定风格：{}\n请优先按这些风格输出 3 套可直接出图的 Agnes 提示词。",
+                "需求：{topic}\n场景指导：{scene_guide}\n输出尺寸建议：{}，宽高比 {}\n生成模式：{}\n{reference_guidance}请严格给出 {} 套可直接出图的 Agnes 提示词，不要额外增加数量。",
                 output_spec.size,
                 output_spec.ratio,
                 if wants_image_to_image { "图生图，基于用户参考图修改或再创作" } else { "文生图" },
-                styles.join(" / ")
+                variant_count
+            )
+        } else {
+            format!(
+                "需求：{topic}\n场景指导：{scene_guide}\n输出尺寸建议：{}，宽高比 {}\n生成模式：{}\n{reference_guidance}指定风格：{}\n请严格按这些风格输出 {} 套可直接出图的 Agnes 提示词，不要额外增加数量。",
+                output_spec.size,
+                output_spec.ratio,
+                if wants_image_to_image { "图生图，基于用户参考图修改或再创作" } else { "文生图" },
+                styles.join(" / "),
+                variant_count
             )
         };
 
@@ -405,7 +476,11 @@ impl OfficeTool for ImagePromptTool {
             Err(err) => return ToolResult::err(format!("初始化 Agnes 客户端失败: {err}")),
         };
 
-        let variants = plan.prompts.into_iter().take(3).collect::<Vec<_>>();
+        let variants = plan
+            .prompts
+            .into_iter()
+            .take(variant_count)
+            .collect::<Vec<_>>();
         if variants.is_empty() {
             return ToolResult::err("没有生成可用的图片提示词");
         }
@@ -668,5 +743,25 @@ mod tests {
             ["primary-image", "backup-image"]
         );
         server.abort();
+    }
+
+    #[test]
+    fn image_variant_count_defaults_to_one() {
+        assert_eq!(infer_image_variant_count("生成一只小猫咪", &[], None), 1);
+        assert_eq!(
+            infer_image_variant_count("生成一张小猫咪的图片", &[], None),
+            1
+        );
+    }
+
+    #[test]
+    fn image_variant_count_respects_explicit_count_and_styles() {
+        assert_eq!(infer_image_variant_count("生成三张小猫咪", &[], None), 3);
+        assert_eq!(infer_image_variant_count("生成图片", &[], Some(2)), 2);
+        assert_eq!(
+            infer_image_variant_count("生成图片", &["写实".into(), "插画".into()], None),
+            2
+        );
+        assert_eq!(infer_image_variant_count("生成十张图片", &[], None), 1);
     }
 }

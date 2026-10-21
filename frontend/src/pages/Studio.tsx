@@ -199,6 +199,7 @@ export default function Studio() {
   const [streamStatus, setStreamStatus] = useState('空闲')
   const [streamPhase, setStreamPhase] = useState<ChatStreamPhase>('idle')
   const [processLogs, setProcessLogs] = useState<string[]>([])
+  const [restoringTabId, setRestoringTabId] = useState<string | null>(null)
   const [attachments, setAttachments] = useState<ChatAttachment[]>([])
   const [inputRefs, setInputRefs] = useState<InputRef[]>([])
   /** 历史会话产物列表（供 @ 引用） */
@@ -420,13 +421,13 @@ export default function Studio() {
   // sessionId 变化时同步到 URL
   useEffect(() => {
     const current = searchParams.get('s')
-    if (initialSessionRestoreRef.current && !sessionId) return
+    if ((initialSessionRestoreRef.current || restoringTabId) && !sessionId) return
     if (sessionId && current !== sessionId) {
       setSearchParams({ s: sessionId }, { replace: true })
     } else if (!sessionId && current) {
       setSearchParams({}, { replace: true })
     }
-  }, [sessionId])
+  }, [sessionId, restoringTabId])
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -715,25 +716,52 @@ export default function Studio() {
     // 在任务空间中打开一个独立 tab，保证切换历史不会中断生图/生视频。
     let targetTabId = currentStore.activeTabId
     const currentTab = targetTabId ? currentStore.tabs[targetTabId] : null
+    const conversation = conversations.find((item) => item.id === id)
     if (!targetTabId || currentTab?.isStreaming || currentTab?.sessionId || (currentTab?.messages.length || 0) > 0) {
       tabCounterRef.current += 1
       targetTabId = `tab-${Date.now()}-${tabCounterRef.current}`
-      openTab(targetTabId)
+      openTab(targetTabId, {
+        tabTitle: conversation?.title?.slice(0, 24) || '恢复历史会话',
+        activeTool: conversation?.tool || 'general',
+        streamStatus: '正在恢复历史会话…',
+        streamPhase: 'thinking',
+        processLogs: ['正在恢复历史会话'],
+      })
       setTabUiState((prev) => ({
         ...prev,
         [targetTabId!]: {
-          input: '', attachments: [], inputRefs: [], streamStatus: '空闲', streamPhase: 'idle',
-          processLogs: [], activeTool: 'general', activeProjectId: null, selectedTheme,
+          input: '', attachments: [], inputRefs: [], streamStatus: '正在恢复历史会话…', streamPhase: 'thinking',
+          processLogs: ['正在恢复历史会话'], activeTool: conversation?.tool || 'general', activeProjectId: null, selectedTheme,
           toolConfig: {}, showArtifactPanel: false, pptProgress: null, followLatestSlide: false,
         },
       }))
+    } else {
+      updateTab(targetTabId, {
+        tabTitle: conversation?.title?.slice(0, 24) || '恢复历史会话',
+        activeTool: conversation?.tool || 'general',
+        streamStatus: '正在恢复历史会话…',
+        streamPhase: 'thinking',
+        processLogs: ['正在恢复历史会话'],
+      })
     }
 
     const loadId = ++conversationLoadRef.current
     const isLatestLoad = () => conversationLoadRef.current === loadId
     const isTargetTabActive = () => usePPTStore.getState().activeTabId === targetTabId
 
+    setRestoringTabId(targetTabId)
     setActiveView('chat')
+    setActiveTool(conversation?.tool || 'general')
+    setActiveProjectId(null)
+    setInput('')
+    setAttachments([])
+    setInputRefs([])
+    setShowArtifactPanel(false)
+    setFollowLatestSlide(false)
+    setPptProgress(null)
+    setStreamPhase('thinking')
+    setStreamStatus('正在恢复历史会话…')
+    setProcessLogs(['正在恢复历史会话'])
     try {
       const res = await sessionApi.getSession(id)
       if (!isLatestLoad()) return
@@ -867,6 +895,18 @@ export default function Studio() {
       console.error('Select conversation error:', err)
       const errMsg = err instanceof Error ? err.message : '未知错误'
       showToast(`恢复历史会话失败：${errMsg}`, 'error')
+      updateTab(targetTabId, {
+        streamPhase: 'error',
+        streamStatus: '恢复历史会话失败',
+        processLogs: [`恢复历史会话失败：${errMsg}`],
+      })
+      if (isTargetTabActive()) {
+        setStreamPhase('error')
+        setStreamStatus('恢复历史会话失败')
+        setProcessLogs([`恢复历史会话失败：${errMsg}`])
+      }
+    } finally {
+      setRestoringTabId((current) => current === targetTabId ? null : current)
     }
   }
 
@@ -2280,6 +2320,7 @@ export default function Studio() {
                 messages={messages}
                 input={input}
                 isStreaming={isStreaming}
+                isRestoringConversation={restoringTabId === activeTabId}
                 streamStatus={streamStatus}
                 streamPhase={streamPhase}
                 processLogs={processLogs}

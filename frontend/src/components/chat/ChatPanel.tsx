@@ -14,6 +14,7 @@ interface ChatPanelProps {
   messages: ChatMessage[]
   input: string
   isStreaming: boolean
+  isRestoringConversation?: boolean
   streamStatus: string
   streamPhase: 'idle' | 'thinking' | 'generating' | 'finishing' | 'done' | 'error'
   processLogs: string[]
@@ -292,6 +293,7 @@ export function ChatPanel({
   messages,
   input,
   isStreaming,
+  isRestoringConversation = false,
   streamStatus,
   streamPhase,
   processLogs,
@@ -587,7 +589,19 @@ export function ChatPanel({
       <div className="relative z-10 flex-1 overflow-y-auto px-3 pb-6 pt-6 md:px-5 md:pb-8 md:pt-10">
         <div className="mx-auto flex w-full max-w-3xl flex-col gap-5">
 
-          {messages.length === 0 && (
+          {messages.length === 0 && isRestoringConversation && (
+            <div className="flex min-h-[50vh] flex-col items-center justify-center text-center">
+              <div className="mb-5 flex h-14 w-14 items-center justify-center rounded-3xl border border-black/5 bg-white/80 shadow-[0_18px_50px_rgba(24,24,27,0.10)] backdrop-blur">
+                <Loader2 className="h-7 w-7 animate-spin text-surface-700" />
+              </div>
+              <h1 className="text-2xl font-semibold tracking-tight text-surface-950">正在恢复历史会话</h1>
+              <p className="mt-3 max-w-xl text-sm leading-6 text-surface-500">
+                正在加载历史消息、执行过程和已生成的产物，请稍候…
+              </p>
+            </div>
+          )}
+
+          {messages.length === 0 && !isRestoringConversation && (
             <div className="flex min-h-[50vh] flex-col items-center justify-center text-center">
               <div className="mb-5 flex h-14 w-14 items-center justify-center rounded-3xl border border-black/5 bg-white/80 shadow-[0_18px_50px_rgba(24,24,27,0.10)] backdrop-blur">
                 <Sparkles className="h-7 w-7 text-surface-900" />

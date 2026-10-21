@@ -111,10 +111,10 @@ export const AGENT_TOOLS: AgentToolConfig[] = [
   },
   {
     id: 'image',
-    name: '图象创作',
-    shortName: '图象',
+    name: '图像创作',
+    shortName: '图像',
     description: '海报、封面、配图、视觉方向和素材生成',
-    artifactLabel: '图象结果',
+    artifactLabel: '图像结果',
     promptPlaceholder: '例如：为产品发布、运营活动、销售方案、技术品牌或培训课程生成主视觉',
     examples: [
       '生成一张 AI 工作台的产品封面图，突出智能协同、效率提升和未来感',

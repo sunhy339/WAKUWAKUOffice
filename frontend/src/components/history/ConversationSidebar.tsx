@@ -83,7 +83,7 @@ const toolLabel: Record<ToolKind, string> = {
   excel: 'excel',
   ppt: 'ppt',
   drawio: 'draw.io',
-  image: '图象',
+  image: '图像',
   video: '视频',
   code: 'Code',
 }

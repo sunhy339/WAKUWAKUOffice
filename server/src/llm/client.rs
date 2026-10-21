@@ -5,6 +5,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::Duration;
+use tokio::time::sleep;
 use tracing::debug;
 
 use super::routing::{select_model, ModelRequirement};
@@ -119,6 +120,9 @@ fn should_retry_with_next_key(status: reqwest::StatusCode) -> bool {
         || status == reqwest::StatusCode::TOO_MANY_REQUESTS
         || status.is_server_error()
 }
+
+const MAX_TRANSIENT_ATTEMPTS: usize = 2;
+const TRANSIENT_RETRY_DELAY: Duration = Duration::from_millis(800);
 
 pub struct LlmClient {
     http: Client,
@@ -385,43 +389,64 @@ impl LlmClient {
         };
         let mut last_error: Option<anyhow::Error> = None;
 
-        for (index, api_key) in keys.iter().enumerate() {
-            let mut request = self
-                .http
-                .post(&url)
-                .header("Content-Type", "application/json")
-                .header("Accept", "application/json")
-                .timeout(self.timeout)
-                .json(&body);
-            if !api_key.is_empty() {
-                request = request.header("Authorization", format!("Bearer {api_key}"));
-            }
+        'keys: for (index, api_key) in keys.iter().enumerate() {
+            for attempt in 0..MAX_TRANSIENT_ATTEMPTS {
+                let mut request = self
+                    .http
+                    .post(&url)
+                    .header("Content-Type", "application/json")
+                    .header("Accept", "application/json")
+                    .timeout(self.timeout)
+                    .json(&body);
+                if !api_key.is_empty() {
+                    request = request.header("Authorization", format!("Bearer {api_key}"));
+                }
 
-            let response = match request.send().await {
-                Ok(response) => response,
-                Err(error) => {
-                    last_error = Some(error.into());
-                    if index + 1 < keys.len() {
-                        continue;
+                let response = match request.send().await {
+                    Ok(response) => response,
+                    Err(error) => {
+                        last_error = Some(anyhow!("Responses API 网络请求失败: {error}"));
+                        if attempt + 1 < MAX_TRANSIENT_ATTEMPTS {
+                            tracing::warn!(
+                                "Responses API request failed for key {}, retrying attempt {}",
+                                index + 1,
+                                attempt + 2
+                            );
+                            sleep(TRANSIENT_RETRY_DELAY).await;
+                            continue;
+                        }
+                        if index + 1 < keys.len() {
+                            continue 'keys;
+                        }
+                        break;
                     }
-                    break;
-                }
-            };
+                };
 
-            let status = response.status();
-            let text = response.text().await.unwrap_or_default();
-            if !status.is_success() {
-                let error = anyhow!("Responses API 返回错误 {status}: {text}");
-                if should_retry_with_next_key(status) && index + 1 < keys.len() {
-                    last_error = Some(error);
-                    continue;
+                let status = response.status();
+                let text = response.text().await.unwrap_or_default();
+                if !status.is_success() {
+                    let error_message = format!("Responses API 返回错误 {status}: {text}");
+                    if should_retry_with_next_key(status) {
+                        last_error = Some(anyhow!(error_message.clone()));
+                        if attempt + 1 < MAX_TRANSIENT_ATTEMPTS {
+                            tracing::warn!(
+                                "Responses API returned {status}, retrying attempt {}",
+                                attempt + 2
+                            );
+                            sleep(TRANSIENT_RETRY_DELAY).await;
+                            continue;
+                        }
+                        if index + 1 < keys.len() {
+                            continue 'keys;
+                        }
+                    }
+                    return Err(anyhow!(error_message));
                 }
-                return Err(error);
+
+                let value: Value = serde_json::from_str(&text)
+                    .map_err(|error| anyhow!("Responses API 返回 JSON 无法解析: {error}"))?;
+                return responses_to_chat_response(value, &self.model);
             }
-
-            let value: Value = serde_json::from_str(&text)
-                .map_err(|error| anyhow!("Responses API 返回 JSON 无法解析: {error}"))?;
-            return responses_to_chat_response(value, &self.model);
         }
 
         Err(last_error.unwrap_or_else(|| anyhow!("当前模型服务未配置可用 API Key")))

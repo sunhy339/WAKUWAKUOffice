@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
+use tokio::time::{timeout, Duration};
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -55,6 +56,9 @@ pub struct AgentConfig {
     pub max_turns: usize,
     pub system_prompt: String,
     pub allowed_tools: Option<Vec<String>>,
+    /// 图片专用请求中，image_prompt 已经返回完整的多风格产物后直接收尾。
+    /// 该工具本身一次会生成多个变体，继续让模型追问同一个工具会造成重复出图。
+    pub finish_after_artifact: bool,
 }
 
 impl Default for AgentConfig {
@@ -63,9 +67,12 @@ impl Default for AgentConfig {
             max_turns: 8,
             system_prompt: DEFAULT_SYSTEM_PROMPT.to_string(),
             allowed_tools: None,
+            finish_after_artifact: false,
         }
     }
 }
+
+const ARTIFACT_FOLLOWUP_TIMEOUT: Duration = Duration::from_secs(120);
 
 const DEFAULT_SYSTEM_PROMPT: &str = r#"你是一个智能办公 Agent。你可以调用工具来帮助用户完成办公任务。
 
@@ -229,18 +236,45 @@ pub async fn run_agent_loop(
             } else {
                 Some(function_defs.as_slice())
             };
-            let llm_response = match client
-                .chat_with_attachments(
-                    &conversation,
-                    tools,
-                    if user_attachments.is_empty() {
-                        None
-                    } else {
-                        Some(user_attachments.as_slice())
-                    },
-                )
-                .await
-            {
+            let llm_result = client.chat_with_attachments(
+                &conversation,
+                tools,
+                if user_attachments.is_empty() {
+                    None
+                } else {
+                    Some(user_attachments.as_slice())
+                },
+            );
+            let llm_result = if all_artifacts.is_empty() {
+                llm_result.await
+            } else {
+                match timeout(ARTIFACT_FOLLOWUP_TIMEOUT, llm_result).await {
+                    Ok(result) => result,
+                    Err(_) => {
+                        let summary = format!(
+                            "已完成任务，已生成 {} 个产物，请查看右侧成果区。",
+                            all_artifacts.len()
+                        );
+                        warn!(
+                            "[AgentLoop] artifact follow-up timed out after {}s, using fallback summary",
+                            ARTIFACT_FOLLOWUP_TIMEOUT.as_secs()
+                        );
+                        let _ = tx
+                            .send(AgentEvent::Message {
+                                content: summary.clone(),
+                            })
+                            .await;
+                        let _ = tx
+                            .send(AgentEvent::Done {
+                                summary,
+                                artifacts: all_artifacts,
+                            })
+                            .await;
+                        return;
+                    }
+                }
+            };
+            let llm_response = match llm_result {
                 Ok(resp) => resp,
                 Err(e) => {
                     let _ = tx
@@ -379,6 +413,7 @@ pub async fn run_agent_loop(
                 });
 
                 // 收集 Artifact
+                let artifact_count_before = all_artifacts.len();
                 if result.success {
                     if let Some(artifact_updates) = &result.artifact_updates {
                         for artifact in artifact_updates {
@@ -409,6 +444,34 @@ pub async fn run_agent_loop(
                         }
                     }
                 }
+
+                // image_prompt 一次已经返回 3 个风格变体。图片专用请求不再把
+                // 同一个工具结果交给模型继续追问，避免重复发起第二轮长耗时生图。
+                if config.finish_after_artifact
+                    && tool_name == "image_prompt"
+                    && all_artifacts.len() > artifact_count_before
+                {
+                    let summary = if result.observation.is_empty() {
+                        format!(
+                            "图片已生成，共 {} 个结果，请查看右侧成果区。",
+                            all_artifacts.len()
+                        )
+                    } else {
+                        result.observation.clone()
+                    };
+                    let _ = tx
+                        .send(AgentEvent::Message {
+                            content: summary.clone(),
+                        })
+                        .await;
+                    let _ = tx
+                        .send(AgentEvent::Done {
+                            summary,
+                            artifacts: all_artifacts,
+                        })
+                        .await;
+                    return;
+                }
             }
 
             let _ = tx.send(AgentEvent::TurnEnd { turn: turn + 1 }).await;
@@ -423,19 +486,24 @@ pub async fn run_agent_loop(
             tool_call_id: None,
         });
 
-        match client
-            .chat_with_attachments(
-                &conversation,
-                None,
-                if user_attachments.is_empty() {
-                    None
-                } else {
-                    Some(user_attachments.as_slice())
-                },
-            )
-            .await
-        {
-            Ok(resp) => {
+        let summary_request = client.chat_with_attachments(
+            &conversation,
+            None,
+            if user_attachments.is_empty() {
+                None
+            } else {
+                Some(user_attachments.as_slice())
+            },
+        );
+        // 纯文本任务保持原有超时语义；只有已经产生了产物时才启用
+        // 收尾超时，避免媒体产物成功后被文本总结接口长时间拖住。
+        let summary_result = if all_artifacts.is_empty() {
+            Ok(summary_request.await)
+        } else {
+            timeout(ARTIFACT_FOLLOWUP_TIMEOUT, summary_request).await
+        };
+        match summary_result {
+            Ok(Ok(resp)) => {
                 let content = resp
                     .choices
                     .first()
@@ -454,11 +522,49 @@ pub async fn run_agent_loop(
                     })
                     .await;
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 warn!("[AgentLoop] summary generation failed: {e}");
+                let summary = if all_artifacts.is_empty() {
+                    format!("已完成 {max_turns} 轮工具调用，但总结生成失败: {e}")
+                } else {
+                    format!(
+                        "已完成任务，已生成 {} 个产物，但总结生成失败，请查看右侧成果区。",
+                        all_artifacts.len()
+                    )
+                };
+                let _ = tx
+                    .send(AgentEvent::Message {
+                        content: summary.clone(),
+                    })
+                    .await;
                 let _ = tx
                     .send(AgentEvent::Done {
-                        summary: format!("已完成 {max_turns} 轮工具调用，但总结生成失败: {e}"),
+                        summary,
+                        artifacts: all_artifacts,
+                    })
+                    .await;
+            }
+            Err(_) => {
+                warn!(
+                    "[AgentLoop] final summary timed out after {}s, using fallback summary",
+                    ARTIFACT_FOLLOWUP_TIMEOUT.as_secs()
+                );
+                let summary = if all_artifacts.is_empty() {
+                    "任务已完成，但总结响应超时。".to_string()
+                } else {
+                    format!(
+                        "已完成任务，已生成 {} 个产物，请查看右侧成果区。",
+                        all_artifacts.len()
+                    )
+                };
+                let _ = tx
+                    .send(AgentEvent::Message {
+                        content: summary.clone(),
+                    })
+                    .await;
+                let _ = tx
+                    .send(AgentEvent::Done {
+                        summary,
                         artifacts: all_artifacts,
                     })
                     .await;

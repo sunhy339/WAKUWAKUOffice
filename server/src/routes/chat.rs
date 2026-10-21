@@ -6,6 +6,7 @@ use futures::stream::Stream;
 use std::collections::HashSet;
 use std::convert::Infallible;
 use std::path::Path as FsPath;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio_stream::wrappers::ReceiverStream;
 
@@ -13,13 +14,161 @@ use crate::agent::{run_agent_loop, AgentConfig, AgentEvent, IntentAnalyzer};
 use crate::auth::middleware::AuthUser;
 use crate::db::{file_repo, project_repo, session_repo, DbPool};
 use crate::error::AppError;
-use crate::models::{Artifact, ChatAttachment, ChatMessage, ChatRequest, PptProject};
+use crate::models::{
+    Artifact, ChatAttachment, ChatMessage, ChatRequest, PptProject, SessionProcessEvent,
+};
 use crate::render;
 use crate::state;
 use crate::storage;
 
 pub fn router() -> Router {
     Router::new().route("/api/chat/stream", post(chat_stream))
+}
+
+const MAX_SESSION_PROCESS_EVENTS: usize = 200;
+const MAX_PROCESS_DETAIL_CHARS: usize = 500;
+
+fn truncate_process_detail(value: &str, limit: usize) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    Some(value.chars().take(limit).collect())
+}
+
+fn push_process_event(events: &Arc<Mutex<Vec<SessionProcessEvent>>>, event: SessionProcessEvent) {
+    let Ok(mut events) = events.lock() else {
+        tracing::warn!("[Sessions] process event lock poisoned");
+        return;
+    };
+    events.push(event);
+    if events.len() > MAX_SESSION_PROCESS_EVENTS {
+        let remove_count = events.len() - MAX_SESSION_PROCESS_EVENTS;
+        events.drain(0..remove_count);
+    }
+}
+
+fn snapshot_process_events(
+    events: &Arc<Mutex<Vec<SessionProcessEvent>>>,
+) -> Vec<SessionProcessEvent> {
+    events
+        .lock()
+        .map(|events| events.clone())
+        .unwrap_or_default()
+}
+
+fn process_event_from_state_update(data: &serde_json::Value) -> Option<SessionProcessEvent> {
+    let title = data.get("step").and_then(serde_json::Value::as_str)?.trim();
+    if title.is_empty() {
+        return None;
+    }
+    let phase = data
+        .get("phase")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("running");
+    let status = if phase == "error" { "error" } else { "success" };
+    let detail = data
+        .get("detail")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| truncate_process_detail(value, MAX_PROCESS_DETAIL_CHARS));
+    let tool = title
+        .strip_prefix("调用工具:")
+        .or_else(|| title.strip_prefix("调用工具："))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
+    Some(SessionProcessEvent {
+        kind: if tool.is_some() { "tool" } else { "state" }.to_string(),
+        title: title.to_string(),
+        detail,
+        status: status.to_string(),
+        tool,
+        at: data
+            .get("at")
+            .and_then(serde_json::Value::as_str)
+            .map(ToString::to_string)
+            .unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
+    })
+}
+
+fn process_event_from_agent_event(event: &AgentEvent) -> Option<SessionProcessEvent> {
+    let at = chrono::Utc::now().to_rfc3339();
+    match event {
+        AgentEvent::Thinking { content } => Some(SessionProcessEvent {
+            kind: "thinking".to_string(),
+            title: "分析摘要".to_string(),
+            detail: truncate_process_detail(content, 200),
+            status: "success".to_string(),
+            tool: None,
+            at,
+        }),
+        AgentEvent::ToolCall { tool, input } => Some(SessionProcessEvent {
+            kind: "tool".to_string(),
+            title: format!("调用工具: {tool}"),
+            detail: truncate_process_detail(&serde_json::to_string(input).unwrap_or_default(), 200),
+            status: "running".to_string(),
+            tool: Some(tool.clone()),
+            at,
+        }),
+        AgentEvent::ToolResult {
+            tool,
+            success,
+            error,
+            ..
+        } => Some(SessionProcessEvent {
+            kind: "tool".to_string(),
+            title: format!("工具 {tool}"),
+            detail: Some(if *success {
+                "完成".to_string()
+            } else {
+                truncate_process_detail(
+                    error.as_deref().unwrap_or("执行失败"),
+                    MAX_PROCESS_DETAIL_CHARS,
+                )
+                .unwrap_or_else(|| "执行失败".to_string())
+            }),
+            status: if *success { "success" } else { "error" }.to_string(),
+            tool: Some(tool.clone()),
+            at,
+        }),
+        AgentEvent::Artifact { artifact } => Some(SessionProcessEvent {
+            kind: "artifact".to_string(),
+            title: "产物生成".to_string(),
+            detail: truncate_process_detail(&artifact.title, MAX_PROCESS_DETAIL_CHARS),
+            status: "success".to_string(),
+            tool: Some(artifact.tool_kind.clone()),
+            at,
+        }),
+        AgentEvent::TurnEnd { turn } => Some(SessionProcessEvent {
+            kind: "state".to_string(),
+            title: format!("第 {turn} 轮完成"),
+            detail: Some(format!("已完成 {turn} 轮工具调用")),
+            status: "success".to_string(),
+            tool: None,
+            at,
+        }),
+        AgentEvent::Done { artifacts, .. } => Some(SessionProcessEvent {
+            kind: "state".to_string(),
+            title: "任务完成".to_string(),
+            detail: Some(if artifacts.is_empty() {
+                "已完成任务".to_string()
+            } else {
+                format!("已完成任务并生成 {} 个产物", artifacts.len())
+            }),
+            status: "success".to_string(),
+            tool: None,
+            at,
+        }),
+        AgentEvent::Error { message } => Some(SessionProcessEvent {
+            kind: "error".to_string(),
+            title: "任务失败".to_string(),
+            detail: truncate_process_detail(message, MAX_PROCESS_DETAIL_CHARS),
+            status: "error".to_string(),
+            tool: None,
+            at,
+        }),
+        AgentEvent::Message { .. } => None,
+    }
 }
 
 fn looks_like_markdown_document(content: &str) -> bool {
@@ -50,6 +199,27 @@ fn build_summary_markdown_artifact(summary: &str, tool_kind: Option<&str>) -> Ar
         created_at: now.clone(),
         updated_at: now,
     }
+}
+
+fn build_summary_mermaid_artifact(summary: &str) -> Option<Artifact> {
+    let mermaid = crate::agent::tools::drawio_generate::extract_mermaid_source(summary)?;
+    let now = chrono::Utc::now().to_rfc3339();
+    Some(Artifact {
+        id: uuid::Uuid::new_v4().to_string(),
+        kind: "drawio".into(),
+        tool_kind: "drawio".into(),
+        title: "流程图结果".into(),
+        status: "ready".into(),
+        content: serde_json::json!({
+            "type": "mermaid",
+            "format": "mermaid",
+            "mermaid": mermaid,
+            "source": "assistant_summary_fallback",
+        }),
+        version: 1,
+        created_at: now.clone(),
+        updated_at: now,
+    })
 }
 
 fn format_attachment_context(attachments: &[ChatAttachment]) -> String {
@@ -372,7 +542,7 @@ fn infer_file_type(name: &str, mime_type: &str) -> String {
         "ppt" | "pptx" => "ppt".into(),
         "doc" | "docx" | "md" | "markdown" | "txt" | "pdf" => "doc".into(),
         "xls" | "xlsx" | "csv" | "tsv" => "excel".into(),
-        "drawio" | "xml" => "drawio".into(),
+        "drawio" | "xml" | "mmd" | "mermaid" => "drawio".into(),
         "png" | "jpg" | "jpeg" | "webp" | "gif" | "svg" => "image".into(),
         "mp4" | "webm" | "mov" => "video".into(),
         _ if mime_type.starts_with("image/") => "image".into(),
@@ -753,6 +923,22 @@ async fn save_generated_artifact_to_files(pool: &DbPool, owner_id: &str, artifac
                     metadata,
                 )
                 .await;
+            } else if let Some(mermaid) = artifact
+                .content
+                .get("mermaid")
+                .and_then(|value| value.as_str())
+            {
+                let filename = artifact_filename(artifact, "diagram", ".mmd");
+                let _ = save_file_bytes(
+                    pool,
+                    owner_id,
+                    &filename,
+                    mermaid.as_bytes(),
+                    "text/vnd.mermaid",
+                    &description,
+                    metadata,
+                )
+                .await;
             }
         }
         "ppt" => {
@@ -973,6 +1159,22 @@ async fn chat_stream(
     let existing_artifacts = session_repo::get_artifacts(&pool, &session_id)
         .await
         .unwrap_or_default();
+    let process_events = Arc::new(Mutex::new(
+        session_repo::get_process_events(&pool, &session_id)
+            .await
+            .unwrap_or_default(),
+    ));
+    push_process_event(
+        &process_events,
+        SessionProcessEvent {
+            kind: "state".to_string(),
+            title: "开始处理请求".to_string(),
+            detail: Some("已接收新的用户请求".to_string()),
+            status: "success".to_string(),
+            tool: None,
+            at: chrono::Utc::now().to_rfc3339(),
+        },
+    );
 
     if let Some(attachments) = req.attachments.as_deref() {
         save_chat_attachments_to_files(&pool, &user.0.id, attachments).await;
@@ -989,6 +1191,12 @@ async fn chat_stream(
         tool_call_id: None,
     };
     let _ = session_repo::add_message(&pool, &session_id, &user_msg).await;
+    let _ = session_repo::save_process_events(
+        &pool,
+        &session_id,
+        &snapshot_process_events(&process_events),
+    )
+    .await;
 
     // 创建 SSE channel
     let (sse_tx, sse_rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(256);
@@ -1042,11 +1250,23 @@ async fn chat_stream(
         max_turns: 10,
         system_prompt,
         allowed_tools,
+        finish_after_artifact: resolved_tool_kind.as_deref() == Some("image")
+            && req
+                .target
+                .as_ref()
+                .map(|target| target.operation != "edit_slide")
+                .unwrap_or(true),
     };
 
     // 创建 tool context 的 emit 回调
     let sse_tx_clone = sse_tx.clone();
+    let process_events_for_emit = Arc::clone(&process_events);
     let emit = move |event: &str, data: serde_json::Value| {
+        if event == "state_update" {
+            if let Some(process_event) = process_event_from_state_update(&data) {
+                push_process_event(&process_events_for_emit, process_event);
+            }
+        }
         let _ = sse_tx_clone.try_send(Ok(Event::default().event(event).data(data.to_string())));
     };
 
@@ -1078,6 +1298,12 @@ async fn chat_stream(
             }),
         );
     }
+    let _ = session_repo::save_process_events(
+        &pool,
+        &session_id,
+        &snapshot_process_events(&process_events),
+    )
+    .await;
 
     // 启动 agent 循环
     let mut event_rx = run_agent_loop(
@@ -1090,6 +1316,7 @@ async fn chat_stream(
     )
     .await;
     let requested_tool_kind = resolved_tool_kind.clone();
+    let process_events_for_task = Arc::clone(&process_events);
 
     tokio::spawn(async move {
         let mut final_summary = String::new();
@@ -1097,6 +1324,9 @@ async fn chat_stream(
         let mut saved_artifact_ids = HashSet::new();
 
         while let Some(event) = event_rx.recv().await {
+            if let Some(process_event) = process_event_from_agent_event(&event) {
+                push_process_event(&process_events_for_task, process_event);
+            }
             let sse_event = match &event {
                 AgentEvent::Thinking { content } => {
                     Event::default().event("state_update").data(serde_json::json!({
@@ -1174,6 +1404,13 @@ async fn chat_stream(
                     {
                         collected_artifacts.push(build_summary_markdown_artifact(&summary, requested_tool_kind.as_deref()));
                     }
+                    if collected_artifacts.is_empty()
+                        && requested_tool_kind.as_deref() == Some("drawio")
+                    {
+                        if let Some(artifact) = build_summary_mermaid_artifact(&summary) {
+                            collected_artifacts.push(artifact);
+                        }
+                    }
                     let session_artifacts = merge_session_artifacts(
                         existing_artifacts_for_save.clone(),
                         collected_artifacts.clone(),
@@ -1211,6 +1448,19 @@ async fn chat_stream(
                     }).to_string())
                 }
             };
+            if let Err(error) = session_repo::save_process_events(
+                &pool_for_save,
+                &session_id_for_save,
+                &snapshot_process_events(&process_events_for_task),
+            )
+            .await
+            {
+                tracing::warn!(
+                    "[Sessions] save process events failed for {}: {}",
+                    session_id_for_save,
+                    error
+                );
+            }
             let _ = sse_tx.send(Ok(sse_event)).await;
 
             // 保存 assistant 消息

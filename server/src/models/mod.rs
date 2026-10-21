@@ -218,6 +218,22 @@ pub struct PersistedChatMessage {
     pub created_at: String,
 }
 
+/// 用户可见的 Agent 执行过程摘要。
+///
+/// 这里保存的是阶段、工具、产物和错误等可复查信息，不保存模型的原始隐藏推理链。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionProcessEvent {
+    pub kind: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+    pub at: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatRequest {
     pub message: String,

@@ -1,4 +1,4 @@
-import { Bot, BrainCircuit, ChevronDown, Clapperboard, Edit3, FileText, Folder, Image, LayoutDashboard, LogOut, MessageSquare, MoreHorizontal, PenTool, Plus, Search, Sheet, Sparkles, Trash2, X } from 'lucide-react'
+import { AlertCircle, Bot, BrainCircuit, ChevronDown, Clapperboard, Edit3, FileText, Folder, Image, LayoutDashboard, Loader2, LogOut, MessageSquare, MoreHorizontal, PenTool, Plus, Search, Sheet, Sparkles, Trash2, X } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import type { CSSProperties, DragEvent } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
@@ -43,9 +43,9 @@ interface ConversationSidebarProps {
   onSelectProject?: (projectId: string) => void
   onNewConversation?: () => void
   onNewProject?: () => void
-  onRenameConversation?: (id: string, title: string) => void
-  onDeleteConversation?: (id: string) => void
-  onDeleteProject?: (projectId: string) => void
+  onRenameConversation?: (id: string, title: string) => Promise<void> | void
+  onDeleteConversation?: (id: string) => Promise<void> | void
+  onDeleteProject?: (projectId: string) => Promise<void> | void
   onMoveConversation?: (id: string, projectId: string | null, beforeId?: string | null) => void
   onLogout?: () => void
   searchQuery?: string
@@ -114,6 +114,11 @@ function sortConversations(items: ConversationRecord[]) {
   return [...items].sort((a, b) => Date.parse(b.updated_at || '') - Date.parse(a.updated_at || '') || (a.order_col || 0) - (b.order_col || 0))
 }
 
+type SidebarDialog =
+  | { type: 'rename'; id: string; title: string; value: string }
+  | { type: 'deleteConversation'; id: string; title: string }
+  | { type: 'deleteProject'; id: string; title: string }
+
 export function ConversationSidebar({
   project,
   messages,
@@ -151,6 +156,18 @@ export function ConversationSidebar({
   const [draggingId, setDraggingId] = useState<string | null>(null)
   const [dropTarget, setDropTarget] = useState<{ projectId: string | null; beforeId: string | null } | null>(null)
   const [unassignedLimit, setUnassignedLimit] = useState(5)
+  const [dialog, setDialog] = useState<SidebarDialog | null>(null)
+  const [dialogBusy, setDialogBusy] = useState(false)
+  const [dialogError, setDialogError] = useState('')
+
+  useEffect(() => {
+    if (!dialog) return
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !dialogBusy) setDialog(null)
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [dialog, dialogBusy])
 
   useEffect(() => {
     if (!activeProjectId) return
@@ -283,9 +300,48 @@ export function ConversationSidebar({
   }
 
   const handleRenameConversation = (item: ConversationRecord) => {
-    const nextTitle = prompt('修改对话标题', trimTitle(item.title))?.trim()
-    if (!nextTitle || nextTitle === trimTitle(item.title)) return
-    onRenameConversation?.(item.id, nextTitle)
+    setDialogError('')
+    setDialog({ type: 'rename', id: item.id, title: trimTitle(item.title), value: trimTitle(item.title) })
+  }
+
+  const handleDialogConfirm = async () => {
+    if (!dialog || dialogBusy) return
+    setDialogError('')
+
+    if (dialog.type === 'rename') {
+      const nextTitle = dialog.value.replace(/\s+/g, ' ').trim()
+      if (!nextTitle) {
+        setDialogError('请输入会话名称')
+        return
+      }
+      if (nextTitle === dialog.title) {
+        setDialog(null)
+        return
+      }
+      if (!onRenameConversation) return
+      setDialogBusy(true)
+      try {
+        await onRenameConversation(dialog.id, nextTitle)
+        setDialog(null)
+      } catch (error) {
+        setDialogError(error instanceof Error ? error.message : '修改会话名称失败，请重试')
+      } finally {
+        setDialogBusy(false)
+      }
+      return
+    }
+
+    const action = dialog.type === 'deleteConversation' ? onDeleteConversation : onDeleteProject
+    if (!action) return
+    setDialogBusy(true)
+    try {
+      await action(dialog.id)
+      setDialog(null)
+    } catch (error) {
+      setDialogError(error instanceof Error ? error.message : '操作失败，请重试')
+    } finally {
+      setDialogBusy(false)
+    }
   }
 
   const handleDragStart = (event: DragEvent<HTMLDivElement>, item: ConversationRecord) => {
@@ -390,7 +446,7 @@ export function ConversationSidebar({
                 </button>
               )}
               {onDeleteConversation && (
-                <button type="button" onClick={() => onDeleteConversation(item.id)} className="rounded-full p-1 text-red-400 hover:bg-red-50 hover:text-red-600" title="删除对话">
+                <button type="button" onClick={() => { setDialogError(''); setDialog({ type: 'deleteConversation', id: item.id, title: trimTitle(item.title) }) }} className="rounded-full p-1 text-red-400 hover:bg-red-50 hover:text-red-600" title="删除对话">
                   <Trash2 className="h-2.5 w-2.5" />
                 </button>
               )}
@@ -461,15 +517,15 @@ export function ConversationSidebar({
           </div>
         </button>
 
-        {item.id !== 'current' && hovered === item.id && (
+        {item.id !== 'current' && !isLocalTab && hovered === item.id && (
           <div className="absolute right-2 top-2 flex items-center gap-1 rounded-full bg-[#f7f2e8]/95 p-0.5 shadow-sm ring-1 ring-black/[0.06]" onClick={(e) => e.stopPropagation()}>
             {onRenameConversation && (
               <button type="button" onClick={() => handleRenameConversation(item)} className="rounded-full p-1.5 text-surface-400 hover:bg-white hover:text-surface-800" title="修改标题">
                 <Edit3 className="h-3 w-3" />
               </button>
             )}
-            {onDeleteConversation && (
-              <button type="button" onClick={() => onDeleteConversation(item.id)} className="rounded-full p-1.5 text-red-400 hover:bg-red-50 hover:text-red-600" title="删除对话">
+              {onDeleteConversation && (
+                <button type="button" onClick={() => { setDialogError(''); setDialog({ type: 'deleteConversation', id: item.id, title: trimTitle(item.title) }) }} className="rounded-full p-1.5 text-red-400 hover:bg-red-50 hover:text-red-600" title="删除对话">
                 <Trash2 className="h-3 w-3" />
               </button>
             )}
@@ -635,7 +691,7 @@ export function ConversationSidebar({
                   {onDeleteProject && (
                     <button
                       type="button"
-                      onClick={(e) => { e.stopPropagation(); if (confirm(`删除项目「${proj.title}」？项目下的对话不会删除。`)) onDeleteProject(proj.id) }}
+                      onClick={(e) => { e.stopPropagation(); setDialogError(''); setDialog({ type: 'deleteProject', id: proj.id, title: proj.title }) }}
                       className="mr-1 rounded-xl p-2 text-surface-300 opacity-0 transition-all hover:bg-red-50 hover:text-red-500 group-hover:opacity-100"
                       title="删除项目"
                     >
@@ -774,6 +830,85 @@ export function ConversationSidebar({
       >
         <div className="absolute right-0 top-1/2 h-12 w-1 -translate-y-1/2 rounded-full bg-surface-950/0 transition-colors group-hover/sidebar:bg-surface-950/12" />
       </div>
+      {dialog && (
+        <div
+          className="fixed inset-0 z-[80] flex items-center justify-center bg-surface-950/20 px-5 backdrop-blur-sm"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="conversation-dialog-title"
+          onMouseDown={(event) => { if (event.target === event.currentTarget && !dialogBusy) setDialog(null) }}
+        >
+          <div className="w-full max-w-md rounded-[2rem] border border-black/[0.06] bg-white/95 p-6 shadow-[0_24px_80px_rgba(24,24,27,0.18)]">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <div className="mb-3 flex h-10 w-10 items-center justify-center rounded-2xl bg-surface-100 text-surface-700">
+                  {dialog.type === 'rename' ? <Edit3 className="h-5 w-5" /> : <Trash2 className="h-5 w-5 text-red-500" />}
+                </div>
+                <h2 id="conversation-dialog-title" className="text-lg font-bold text-surface-950">
+                  {dialog.type === 'rename' ? '修改会话名称' : dialog.type === 'deleteConversation' ? '删除会话' : '删除项目'}
+                </h2>
+                <p className="mt-1 text-sm leading-6 text-surface-500">
+                  {dialog.type === 'rename' ? '名称只用于左侧列表展示，不会改变会话内容。' : dialog.type === 'deleteConversation' ? '删除后会话、消息和产物记录都不会再显示，且无法恢复。' : '项目会被删除，但项目下的对话不会删除。'}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => { if (!dialogBusy) setDialog(null) }}
+                className="rounded-full p-2 text-surface-400 transition hover:bg-surface-100 hover:text-surface-950"
+                aria-label="关闭弹窗"
+                disabled={dialogBusy}
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            {dialog.type === 'rename' ? (
+              <label className="mt-5 block text-xs font-bold text-surface-500">
+                会话名称
+                <input
+                  autoFocus
+                  value={dialog.value}
+                  maxLength={80}
+                  onChange={(event) => setDialog((current) => current?.type === 'rename' ? { ...current, value: event.target.value } : current)}
+                  onKeyDown={(event) => { if (event.key === 'Enter') void handleDialogConfirm() }}
+                  className="mt-2 w-full rounded-2xl border border-black/10 bg-white px-3 py-3 text-sm text-surface-900 outline-none transition focus:border-surface-500 focus:ring-4 focus:ring-surface-950/5"
+                />
+              </label>
+            ) : (
+              <div className="mt-5 rounded-2xl border border-black/[0.06] bg-surface-50 px-3 py-3 text-sm font-semibold text-surface-700">
+                {dialog.title}
+              </div>
+            )}
+
+            {dialogError && (
+              <div className="mt-3 flex items-start gap-2 rounded-2xl border border-red-200 bg-red-50 px-3 py-2.5 text-xs leading-5 text-red-700">
+                <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                <span>{dialogError}</span>
+              </div>
+            )}
+
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setDialog(null)}
+                disabled={dialogBusy}
+                className="rounded-full border border-black/10 bg-white px-4 py-2 text-sm font-semibold text-surface-600 transition hover:bg-surface-50 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleDialogConfirm()}
+                disabled={dialogBusy}
+                className={`inline-flex items-center gap-1.5 rounded-full px-4 py-2 text-sm font-semibold text-white transition disabled:cursor-not-allowed disabled:opacity-60 ${dialog.type === 'rename' ? 'bg-surface-950 hover:bg-surface-800' : 'bg-red-500 hover:bg-red-600'}`}
+              >
+                {dialogBusy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                {dialog.type === 'rename' ? '保存名称' : '确认删除'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </aside>
   )
 }

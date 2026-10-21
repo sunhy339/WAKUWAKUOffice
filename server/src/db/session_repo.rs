@@ -1,6 +1,6 @@
 use super::DbPool;
 use crate::error::AppResult;
-use crate::models::{Artifact, ChatMessage, PersistedChatMessage};
+use crate::models::{Artifact, ChatMessage, PersistedChatMessage, SessionProcessEvent};
 use serde::{Deserialize, Serialize};
 use sqlx::any::AnyRow;
 use sqlx::Row;
@@ -49,6 +49,7 @@ pub struct SessionDetail {
     pub tool_kind: Option<String>,
     pub title: String,
     pub summary: Option<String>,
+    pub process_events: Vec<SessionProcessEvent>,
     pub message_count: i64,
     pub order_col: i64,
     pub created_at: String,
@@ -362,13 +363,21 @@ pub async fn get_artifacts(pool: &DbPool, session_id: &str) -> AppResult<Vec<Art
 pub async fn get_session_detail(
     pool: &DbPool,
     session_id: &str,
+    include_artifacts: bool,
 ) -> AppResult<Option<SessionDetail>> {
     let session = match find_by_id(pool, session_id).await? {
         Some(session) => session,
         None => return Ok(None),
     };
     let messages = get_persisted_messages(pool, session_id, 100).await?;
-    let artifacts = get_artifacts(pool, session_id).await?;
+    // Image/video artifacts may contain large base64 payloads. Keep them out of
+    // the fast history response so messages and process events can render first.
+    let artifacts = if include_artifacts {
+        get_artifacts(pool, session_id).await?
+    } else {
+        Vec::new()
+    };
+    let process_events = get_process_events(pool, session_id).await?;
     Ok(Some(SessionDetail {
         id: session.id,
         owner_id: session.owner_id,
@@ -376,6 +385,7 @@ pub async fn get_session_detail(
         tool_kind: session.tool_kind,
         title: session.title,
         summary: session.summary,
+        process_events,
         message_count: session.message_count,
         order_col: session.order_col,
         created_at: session.created_at,
@@ -383,6 +393,49 @@ pub async fn get_session_detail(
         messages,
         artifacts,
     }))
+}
+
+pub async fn get_process_events(
+    pool: &DbPool,
+    session_id: &str,
+) -> AppResult<Vec<SessionProcessEvent>> {
+    let row = sqlx::query("SELECT process_events FROM sessions WHERE id = ?")
+        .bind(session_id)
+        .fetch_optional(pool)
+        .await?;
+
+    let Some(row) = row else {
+        return Ok(Vec::new());
+    };
+
+    let payload = read_optional_text(&row, 0)?.unwrap_or_else(|| "[]".to_string());
+    match serde_json::from_str::<Vec<SessionProcessEvent>>(&payload) {
+        Ok(events) => Ok(events),
+        Err(error) => {
+            tracing::warn!(
+                "[Sessions] invalid process_events for {}: {}",
+                session_id,
+                error
+            );
+            Ok(Vec::new())
+        }
+    }
+}
+
+pub async fn save_process_events(
+    pool: &DbPool,
+    session_id: &str,
+    events: &[SessionProcessEvent],
+) -> AppResult<()> {
+    let payload = serde_json::to_string(events)?;
+    let now = chrono::Utc::now().to_rfc3339();
+    sqlx::query("UPDATE sessions SET process_events = ?, updated_at = ? WHERE id = ?")
+        .bind(&payload)
+        .bind(&now)
+        .bind(session_id)
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 pub async fn add_message(pool: &DbPool, session_id: &str, msg: &ChatMessage) -> AppResult<()> {
@@ -504,11 +557,35 @@ pub async fn get_persisted_messages(
 }
 
 pub async fn delete(pool: &DbPool, session_id: &str, owner_id: &str) -> AppResult<bool> {
+    // 不依赖数据库是否开启外键级联：MySQL 旧表结构没有声明级联约束，
+    // 直接删除 sessions 会留下消息和产物孤儿记录。先校验所有权，再在
+    // 同一事务内清理子表，保证删除结果与 UI 列表保持一致。
+    let mut tx = pool.begin().await?;
+    let session = sqlx::query("SELECT id FROM sessions WHERE id = ? AND owner_id = ?")
+        .bind(session_id)
+        .bind(owner_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+    if session.is_none() {
+        tx.rollback().await?;
+        return Ok(false);
+    }
+
+    sqlx::query("DELETE FROM messages WHERE session_id = ?")
+        .bind(session_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM session_artifacts WHERE session_id = ?")
+        .bind(session_id)
+        .execute(&mut *tx)
+        .await?;
     let result = sqlx::query("DELETE FROM sessions WHERE id = ? AND owner_id = ?")
         .bind(session_id)
         .bind(owner_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
+    tx.commit().await?;
     Ok(result.rows_affected() > 0)
 }
 
@@ -530,10 +607,13 @@ pub async fn clear_messages(pool: &DbPool, session_id: &str, owner_id: &str) -> 
         .await?;
 
     let now = chrono::Utc::now().to_rfc3339();
-    sqlx::query("UPDATE sessions SET message_count = 0, updated_at = ? WHERE id = ?")
-        .bind(&now)
-        .bind(session_id)
-        .execute(pool)
-        .await?;
+    sqlx::query(
+        "UPDATE sessions SET message_count = 0, process_events = ?, updated_at = ? WHERE id = ?",
+    )
+    .bind("[]")
+    .bind(&now)
+    .bind(session_id)
+    .execute(pool)
+    .await?;
     Ok(true)
 }

@@ -1,5 +1,6 @@
-import { Clapperboard, Code2, Download, Eye, GripVertical, Image, Layers3, Maximize2, Minimize2, MessageSquarePlus, PenTool, Pencil, Save, Sparkles } from 'lucide-react'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { Check, Clapperboard, Code2, Copy, Download, Eye, GripVertical, Image, Layers3, Maximize2, Minimize2, MessageSquarePlus, PenTool, Pencil, Save, Sparkles } from 'lucide-react'
+import { useEffect, useId, useMemo, useRef, useState } from 'react'
+import mermaid from 'mermaid'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
@@ -13,6 +14,7 @@ import { Toolbar } from '@/components/toolbar/Toolbar'
 import { WordPreview } from '@/components/artifacts/WordPreview'
 import type { Artifact, ChatMessage, PPTProject, Slide, ToolKind } from '@/types'
 import { findArtifactTurnGroup, groupArtifactsByTurn } from '@/lib/artifact-turns'
+import { prepareMermaidSourceForRender } from '@/lib/mermaid'
 
 interface ArtifactPanelProps {
   activeTool: ToolKind
@@ -265,7 +267,86 @@ function MarkdownArtifact({ artifact, onExport, onInsert }: { artifact: Artifact
   )
 }
 
+function MermaidArtifact({ artifact, onInsert }: { artifact: Artifact, onInsert: () => void }) {
+  const source = artifact.content?.mermaid || ''
+  const renderSource = prepareMermaidSourceForRender(source)
+  const renderId = `mermaid-${useId().replace(/:/g, '')}`
+  const [svg, setSvg] = useState('')
+  const [error, setError] = useState('')
+  const [copied, setCopied] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    setSvg('')
+    setError('')
+    mermaid.initialize({
+      startOnLoad: false,
+      securityLevel: 'strict',
+      theme: 'base',
+      themeVariables: {
+        primaryColor: '#eef2ff',
+        primaryTextColor: '#1e293b',
+        primaryBorderColor: '#6366f1',
+        lineColor: '#64748b',
+        secondaryColor: '#f8fafc',
+        tertiaryColor: '#f5f3ff',
+      },
+    })
+    void mermaid.render(renderId, renderSource)
+      .then(({ svg: rendered }) => {
+        if (!cancelled) setSvg(rendered)
+      })
+      .catch((renderError) => {
+        if (!cancelled) setError(renderError instanceof Error ? renderError.message : 'Mermaid 图表渲染失败')
+      })
+    return () => { cancelled = true }
+  }, [renderId, source])
+
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(source)
+      setCopied(true)
+      window.setTimeout(() => setCopied(false), 1600)
+    } catch {
+      setError('复制 Mermaid 源码失败，请手动选择复制')
+    }
+  }
+
+  return (
+    <div className="w-full max-w-4xl space-y-3">
+      <div className="overflow-hidden rounded-2xl border border-surface-200 bg-white shadow-sm">
+        <div className="flex min-h-11 items-center justify-between gap-3 border-b border-surface-100 bg-violet-50 px-3 py-2 text-xs text-violet-700">
+          <div className="flex min-w-0 items-center gap-2 font-semibold"><PenTool className="h-4 w-4 shrink-0" />{artifact.title || '流程图预览'}</div>
+          <div className="flex shrink-0 items-center gap-2">
+            <span className="rounded-full bg-white/80 px-2 py-1 text-[11px]">Mermaid 可视化</span>
+            <button type="button" onClick={onInsert} className="inline-flex items-center gap-1 rounded-full border border-violet-200 bg-white px-2 py-1 text-violet-700 hover:bg-violet-50"><MessageSquarePlus className="h-3 w-3" />引用</button>
+          </div>
+        </div>
+        <div className="min-h-[360px] overflow-auto bg-gradient-to-br from-violet-50/60 via-white to-sky-50/60 p-5">
+          {svg ? <div className="flex min-h-[320px] items-center justify-center [&>svg]:max-w-full" dangerouslySetInnerHTML={{ __html: svg }} /> : (
+            <div className="flex min-h-[320px] items-center justify-center text-sm text-surface-400">{error ? '图表渲染失败，仍可复制源码' : '正在渲染流程图…'}</div>
+          )}
+        </div>
+      </div>
+      <div className="overflow-hidden rounded-2xl border border-surface-200 bg-white shadow-sm">
+        <div className="flex items-center justify-between border-b border-surface-100 bg-surface-50 px-3 py-2 text-xs font-semibold text-surface-600">
+          <span>Mermaid 源码</span>
+          <button type="button" onClick={handleCopy} className="inline-flex items-center gap-1 rounded-full border border-surface-200 bg-white px-2.5 py-1 text-[11px] text-surface-600 hover:bg-surface-50">
+            {copied ? <Check className="h-3 w-3 text-emerald-600" /> : <Copy className="h-3 w-3" />}{copied ? '已复制' : '复制源码'}
+          </button>
+        </div>
+        <pre className="max-h-72 overflow-auto whitespace-pre-wrap bg-slate-950 p-4 text-xs leading-6 text-slate-100">{source || '暂无 Mermaid 源码'}{error && <span className="mt-2 block text-amber-300">渲染提示：{error}</span>}</pre>
+      </div>
+    </div>
+  )
+}
+
 function DrawIoArtifact({ artifact, onUpdate, onInsert }: { artifact: Artifact, onUpdate: (updates: Partial<Artifact>) => void, onInsert: () => void }) {
+  if (artifact.content?.mermaid) return <MermaidArtifact artifact={artifact} onInsert={onInsert} />
+  return <DrawIoXmlArtifact artifact={artifact} onUpdate={onUpdate} onInsert={onInsert} />
+}
+
+function DrawIoXmlArtifact({ artifact, onUpdate, onInsert }: { artifact: Artifact, onUpdate: (updates: Partial<Artifact>) => void, onInsert: () => void }) {
   const ref = useRef<DrawIoEmbedRef>(null)
   const xml = artifact.content?.xml || createFallbackDrawioXml(artifact.title)
   const [mode, setMode] = useState<'preview' | 'edit'>('preview')

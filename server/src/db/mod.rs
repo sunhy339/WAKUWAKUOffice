@@ -69,6 +69,18 @@ async fn run_migrations_sqlite(pool: &sqlx::SqlitePool) -> Result<()> {
             .await?;
     }
 
+    let has_process_events: bool = sqlx::query_scalar(
+        "SELECT COUNT(*) > 0 FROM pragma_table_info('sessions') WHERE name = 'process_events'",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(false);
+
+    if !has_process_events {
+        let process_events_sql = include_str!("../../../migrations/004_session_process_events.sql");
+        sqlx::raw_sql(process_events_sql).execute(pool).await?;
+    }
+
     let has_auth_version: bool = sqlx::query_scalar(
         "SELECT COUNT(*) > 0 FROM pragma_table_info('users') WHERE name = 'auth_version'",
     )
@@ -146,6 +158,19 @@ async fn run_migrations_mysql(pool: &sqlx::MySqlPool) -> Result<()> {
         sqlx::query("ALTER TABLE users ADD COLUMN auth_version BIGINT NOT NULL DEFAULT 0")
             .execute(pool)
             .await?;
+    }
+
+    let has_process_events: bool = sqlx::query_scalar(
+        "SELECT COUNT(*) > 0 FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'sessions' AND column_name = 'process_events'",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(false);
+
+    if !has_process_events {
+        let process_events_sql =
+            include_str!("../../../migrations/004_session_process_events_mysql.sql");
+        sqlx::raw_sql(process_events_sql).execute(pool).await?;
     }
 
     let reset_tokens_sql = include_str!("../../../migrations/002_password_reset_mysql.sql");

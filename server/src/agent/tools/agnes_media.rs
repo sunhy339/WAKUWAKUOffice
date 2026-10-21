@@ -5,6 +5,7 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use std::sync::Mutex;
 use std::time::Duration;
+use tokio::time::sleep;
 
 #[derive(Debug, Clone)]
 pub struct AgnesCredentials {
@@ -327,6 +328,9 @@ fn should_retry_agnes(status: reqwest::StatusCode) -> bool {
         || status.is_server_error()
 }
 
+const MAX_TRANSIENT_ATTEMPTS: usize = 2;
+const TRANSIENT_RETRY_DELAY: Duration = Duration::from_millis(800);
+
 /// 带 API Key 负载均衡的 POST 请求
 pub async fn post_json<T: DeserializeOwned>(
     client: &Client,
@@ -350,37 +354,58 @@ pub async fn post_json_url<T: DeserializeOwned>(
 
     let mut last_error: Option<anyhow::Error> = None;
 
-    for (index, api_key) in keys.iter().enumerate() {
-        let response = client
-            .post(url)
-            .header("Authorization", format!("Bearer {api_key}"))
-            .header("Content-Type", "application/json")
-            .json(body)
-            .send()
-            .await;
+    'keys: for (index, api_key) in keys.iter().enumerate() {
+        for attempt in 0..MAX_TRANSIENT_ATTEMPTS {
+            let response = client
+                .post(url)
+                .header("Authorization", format!("Bearer {api_key}"))
+                .header("Content-Type", "application/json")
+                .json(body)
+                .send()
+                .await;
 
-        match response {
-            Ok(resp) => {
-                if !resp.status().is_success() {
-                    let status = resp.status();
-                    let detail = resp.text().await.unwrap_or_default();
-                    let err = anyhow!("Agnes API 返回错误 {status}: {detail}");
-                    if should_retry_agnes(status) && index + 1 < keys.len() {
+            match response {
+                Ok(resp) => {
+                    if !resp.status().is_success() {
+                        let status = resp.status();
+                        let detail = resp.text().await.unwrap_or_default();
+                        let error_message = format!("Agnes API 返回错误 {status}: {detail}");
+                        if should_retry_agnes(status) {
+                            last_error = Some(anyhow!(error_message.clone()));
+                            if attempt + 1 < MAX_TRANSIENT_ATTEMPTS {
+                                tracing::warn!(
+                                    "Agnes API returned {status}, retrying attempt {}",
+                                    attempt + 2
+                                );
+                                sleep(TRANSIENT_RETRY_DELAY).await;
+                                continue;
+                            }
+                            if index + 1 < keys.len() {
+                                tracing::warn!(
+                                    "Agnes API key {} failed with {status}, retrying next key",
+                                    index
+                                );
+                                continue 'keys;
+                            }
+                        }
+                        return Err(anyhow!(error_message));
+                    }
+                    return Ok(resp.json::<T>().await?);
+                }
+                Err(err) => {
+                    last_error = Some(anyhow!("Agnes API 网络请求失败: {err}"));
+                    if attempt + 1 < MAX_TRANSIENT_ATTEMPTS {
                         tracing::warn!(
-                            "Agnes API key {} failed with {status}, retrying next key",
-                            index
+                            "Agnes API request failed for key {}, retrying attempt {}",
+                            index + 1,
+                            attempt + 2
                         );
-                        last_error = Some(err);
+                        sleep(TRANSIENT_RETRY_DELAY).await;
                         continue;
                     }
-                    return Err(err);
-                }
-                return Ok(resp.json::<T>().await?);
-            }
-            Err(err) => {
-                last_error = Some(err.into());
-                if index + 1 < keys.len() {
-                    continue;
+                    if index + 1 < keys.len() {
+                        continue 'keys;
+                    }
                 }
             }
         }

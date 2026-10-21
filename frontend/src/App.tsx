@@ -1,5 +1,6 @@
 import { Routes, Route, Navigate } from 'react-router-dom'
 import { lazy, Suspense, useEffect, useState } from 'react'
+import { useLocation } from 'react-router-dom'
 import { useAuthStore } from '@/stores/auth-store'
 import { authApi } from '@/api'
 import Login from '@/pages/Login'
@@ -11,6 +12,40 @@ const FilesPage = lazy(() => import('@/pages/files/FilesPage'))
 
 function Loading() {
   return <div className="flex items-center justify-center h-screen text-slate-400">加载中…</div>
+}
+
+/**
+ * 工作台和文件中心共用一个页面生命周期。
+ *
+ * Studio 内部持有 SSE 请求、AbortController 以及未完成会话的本地状态。
+ * 如果文件中心切换成另一条路由并卸载 Studio，正在生成的任务会失去前端
+ * 订阅，返回时还可能触发历史会话恢复，从而表现为任务被取消、消息消失。
+ * 这里保留两页同时挂载，仅切换可见性，让文件中心不会影响工作台任务。
+ */
+function WorkspaceRoute() {
+  const location = useLocation()
+  const isFilesPage = location.pathname === '/files'
+
+  if (location.pathname !== '/' && !isFilesPage) {
+    return <Navigate to="/" replace />
+  }
+
+  return (
+    <>
+      <div className={isFilesPage ? 'hidden' : 'contents'}>
+        <Suspense fallback={<Loading />}>
+          <Studio />
+        </Suspense>
+      </div>
+      <div className={isFilesPage ? 'contents' : 'hidden'}>
+        <Suspense fallback={<Loading />}>
+          <AppLayout>
+            <FilesPage />
+          </AppLayout>
+        </Suspense>
+      </div>
+    </>
+  )
 }
 
 function App() {
@@ -60,12 +95,8 @@ function App() {
       <Routes>
         <Route path="/reset-password" element={<ResetPassword />} />
         <Route path="/login" element={<Navigate to="/" />} />
-        <Route path="/" element={<Studio />} />
-        <Route element={<AppLayout />}>
-          <Route path="/files" element={<FilesPage />} />
-          <Route path="/studio" element={<Navigate to="/" replace />} />
-          <Route path="/*" element={<Navigate to="/" />} />
-        </Route>
+        <Route path="/studio" element={<Navigate to="/" replace />} />
+        <Route path="/*" element={<WorkspaceRoute />} />
       </Routes>
     </Suspense>
   )

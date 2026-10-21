@@ -19,6 +19,10 @@ pub fn router() -> Router {
                 .patch(update_session)
                 .delete(delete_session),
         )
+        .route(
+            "/api/chat/session/:session_id/artifacts",
+            get(get_session_artifacts),
+        )
         .route("/api/chat/session/:session_id/messages", get(get_messages))
         .route("/api/chat/session/:session_id/clear", post(clear_session))
 }
@@ -26,6 +30,11 @@ pub fn router() -> Router {
 #[derive(Deserialize)]
 struct SessionListQuery {
     q: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct SessionDetailQuery {
+    include_artifacts: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -73,6 +82,7 @@ async fn list_sessions(
 async fn get_session(
     user: AuthUser,
     Path(session_id): Path<String>,
+    Query(query): Query<SessionDetailQuery>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let pool = state::db_pool();
     tracing::info!(
@@ -80,17 +90,36 @@ async fn get_session(
         session_id,
         user.0.id
     );
-    let session = session_repo::get_session_detail(&pool, &session_id)
-        .await
-        .map_err(|e| {
-            tracing::error!("[Session] get_session_detail error: {:?}", e);
-            e
-        })?
-        .ok_or(AppError::NotFound("会话不存在".into()))?;
+    let session = session_repo::get_session_detail(
+        &pool,
+        &session_id,
+        query.include_artifacts.unwrap_or(false),
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!("[Session] get_session_detail error: {:?}", e);
+        e
+    })?
+    .ok_or(AppError::NotFound("会话不存在".into()))?;
     if session.owner_id != user.0.id {
         return Err(AppError::Forbidden);
     }
     Ok(Json(json!(session)))
+}
+
+async fn get_session_artifacts(
+    user: AuthUser,
+    Path(session_id): Path<String>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let pool = state::db_pool();
+    let session = session_repo::find_by_id(&pool, &session_id)
+        .await?
+        .ok_or(AppError::NotFound("会话不存在".into()))?;
+    if session.owner_id != user.0.id {
+        return Err(AppError::Forbidden);
+    }
+    let artifacts = session_repo::get_artifacts(&pool, &session_id).await?;
+    Ok(Json(json!({ "artifacts": artifacts })))
 }
 
 async fn get_messages(

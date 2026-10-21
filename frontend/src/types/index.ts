@@ -149,6 +149,15 @@ export interface ProjectMeta {
   updated_at: string;
 }
 
+export interface SessionProcessEvent {
+  kind: 'state' | 'thinking' | 'tool' | 'artifact' | 'error' | string;
+  title: string;
+  detail?: string;
+  status: 'running' | 'success' | 'error' | string;
+  tool?: string;
+  at: string;
+}
+
 export interface PersistedSession {
   id: string;
   owner_id: string;
@@ -159,6 +168,7 @@ export interface PersistedSession {
     tool_call_id?: string;
     created_at?: string;
   }>;
+  process_events?: SessionProcessEvent[];
   artifacts?: Artifact[];
   project_id?: string;
   tool_kind?: ToolKind;

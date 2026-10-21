@@ -972,6 +972,13 @@ export default function Studio() {
 
   const handleDeleteConversation = async (id: string) => {
     if (!confirm('确认删除该对话？此操作不可恢复。')) return
+    const deleteState = usePPTStore.getState()
+    const deleteTabs = Object.values(deleteState.tabs).filter((tab) => tab.sessionId === id)
+    const hasWorkingTab = deleteTabs.some((tab) => tab.isStreaming && tab.streamPhase !== 'done' && tab.streamPhase !== 'error' && tab.streamPhase !== 'idle')
+    if (hasWorkingTab) {
+      showToast('当前会话仍在生成中，暂不能删除；请等待任务完成后再删除。', 'info')
+      return
+    }
     // 让正在进行的历史恢复立即失效，避免删除响应与较早的 getSession
     // 竞态，导致已删除会话又被写回当前 Tab。
     conversationLoadRef.current += 1
@@ -980,11 +987,13 @@ export default function Studio() {
       deletedConversationIdsRef.current.add(id)
       // 服务端删除后同步清理本地 Tab。否则已删除的历史会话会因为
       // localTabs 仍然持有 sessionId，又以“任务空间”项目重新出现。
-      const matchingTabs = Object.values(usePPTStore.getState().tabs).filter((tab) => tab.sessionId === id)
+      const currentState = usePPTStore.getState()
+      const currentActiveTabId = currentState.activeTabId
+      const matchingTabs = Object.values(currentState.tabs).filter((tab) => tab.sessionId === id)
       for (const tab of matchingTabs) {
         const isWorking = tab.isStreaming && tab.streamPhase !== 'done' && tab.streamPhase !== 'error' && tab.streamPhase !== 'idle'
         if (isWorking) continue
-        if (tab.tabId === activeTabId) {
+        if (tab.tabId === currentActiveTabId) {
           reset()
           updateTab(tab.tabId, { tabTitle: '新对话', sessionId: null, activeTool: 'general', streamStatus: '空闲', streamPhase: 'idle', processLogs: [] })
         } else {
@@ -994,14 +1003,14 @@ export default function Studio() {
       setTabUiState((prev) => {
         const next = { ...prev }
         for (const tab of matchingTabs) {
-          if (tab.tabId !== activeTabId) delete next[tab.tabId]
+          if (tab.tabId !== currentActiveTabId) delete next[tab.tabId]
           else if (next[tab.tabId]) next[tab.tabId] = { ...next[tab.tabId], input: '', attachments: [], inputRefs: [], streamStatus: '空闲', streamPhase: 'idle', processLogs: [], activeTool: 'general', activeProjectId: null, toolConfig: {}, showArtifactPanel: false, pptProgress: null, followLatestSlide: true }
         }
         return next
       })
       // 先做乐观移除，避免接口成功后到下一次刷新之间仍能点击到旧条目。
       setConversations((items) => items.filter((item) => item.id !== id))
-      if (sessionId === id) {
+      if (usePPTStore.getState().sessionId === id) {
         reset()
         setSearchParams({}, { replace: true })
         setInput('')

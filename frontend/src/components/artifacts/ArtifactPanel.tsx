@@ -14,6 +14,7 @@ import { Toolbar } from '@/components/toolbar/Toolbar'
 import { WordPreview } from '@/components/artifacts/WordPreview'
 import type { Artifact, ChatMessage, PPTProject, Slide, ToolKind } from '@/types'
 import { findArtifactTurnGroup, groupArtifactsByTurn } from '@/lib/artifact-turns'
+import { prepareMermaidSourceForRender } from '@/lib/mermaid'
 
 interface ArtifactPanelProps {
   activeTool: ToolKind
@@ -268,6 +269,7 @@ function MarkdownArtifact({ artifact, onExport, onInsert }: { artifact: Artifact
 
 function MermaidArtifact({ artifact, onInsert }: { artifact: Artifact, onInsert: () => void }) {
   const source = artifact.content?.mermaid || ''
+  const renderSource = prepareMermaidSourceForRender(source)
   const renderId = `mermaid-${useId().replace(/:/g, '')}`
   const [svg, setSvg] = useState('')
   const [error, setError] = useState('')
@@ -290,7 +292,7 @@ function MermaidArtifact({ artifact, onInsert }: { artifact: Artifact, onInsert:
         tertiaryColor: '#f5f3ff',
       },
     })
-    void mermaid.render(renderId, source)
+    void mermaid.render(renderId, renderSource)
       .then(({ svg: rendered }) => {
         if (!cancelled) setSvg(rendered)
       })

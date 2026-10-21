@@ -2,10 +2,10 @@
 
 ## 1. 基本信息
 
-- 当前开发分支：`feature/generation-task-keepalive`
+- 当前开发分支：`feature/artifact-finalization-guard`
 - 集成开发分支：`develop`
 - 稳定基线分支：`main`
-- `develop` 当前基线提交：`53433572e18ee2351935d88e5a5fb6e5f5b25cc8`
+- `develop` 当前基线提交：`f598bcd`
 - 开发规范：[universal-software-development-standard.md](./universal-software-development-standard.md)
 - 当前原则：保留现有功能，采用小步迭代；每个功能完成后先进入“待验收”，经用户确认后才标记为“已完成”。
 
@@ -479,6 +479,13 @@
 | 用户验收 | 待验收 | 请在远程页面再次确认该场景；用户确认前不标记完成 |
 
 本批保持“待验收”，用户确认前不合并到 `develop`。
+
+### 本轮收尾补强
+
+- Agent 已生成图片、视频或文档产物后，后续文本总结请求如果返回 502、网络错误、空响应或超时，统一发送降级 `message` 和 `done` 事件。
+- 降级完成消息保留产物数量和“查看右侧成果区”的下一步提示；普通文本请求没有产物时仍沿用原有错误语义。
+- 该补强只改变产物已落地后的收口方式，不改变工具调用、模型路由和普通对话错误处理。
+- 本地已通过 Rust 格式检查、36 项测试和 `git diff --check`；远程部署和真实 502 回归待本轮完成。
 
 ## 18. P1-12 流程图 Mermaid 降级预览、历史恢复与会话操作修复（待验收）
 

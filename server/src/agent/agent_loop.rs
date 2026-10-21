@@ -74,6 +74,13 @@ impl Default for AgentConfig {
 
 const ARTIFACT_FOLLOWUP_TIMEOUT: Duration = Duration::from_secs(120);
 
+fn artifact_fallback_summary(artifact_count: usize) -> String {
+    format!(
+        "已完成任务，已生成 {} 个产物；文本总结暂时不可用，请查看右侧成果区。",
+        artifact_count
+    )
+}
+
 const DEFAULT_SYSTEM_PROMPT: &str = r#"你是一个智能办公 Agent。你可以调用工具来帮助用户完成办公任务。
 
 ## 工作原则
@@ -251,10 +258,7 @@ pub async fn run_agent_loop(
                 match timeout(ARTIFACT_FOLLOWUP_TIMEOUT, llm_result).await {
                     Ok(result) => result,
                     Err(_) => {
-                        let summary = format!(
-                            "已完成任务，已生成 {} 个产物，请查看右侧成果区。",
-                            all_artifacts.len()
-                        );
+                        let summary = artifact_fallback_summary(all_artifacts.len());
                         warn!(
                             "[AgentLoop] artifact follow-up timed out after {}s, using fallback summary",
                             ARTIFACT_FOLLOWUP_TIMEOUT.as_secs()
@@ -277,6 +281,24 @@ pub async fn run_agent_loop(
             let llm_response = match llm_result {
                 Ok(resp) => resp,
                 Err(e) => {
+                    if !all_artifacts.is_empty() {
+                        let summary = artifact_fallback_summary(all_artifacts.len());
+                        warn!(
+                            "[AgentLoop] follow-up failed after artifacts were generated: {e}; using fallback summary"
+                        );
+                        let _ = tx
+                            .send(AgentEvent::Message {
+                                content: summary.clone(),
+                            })
+                            .await;
+                        let _ = tx
+                            .send(AgentEvent::Done {
+                                summary,
+                                artifacts: all_artifacts,
+                            })
+                            .await;
+                        return;
+                    }
                     let _ = tx
                         .send(AgentEvent::Error {
                             message: format!("LLM 调用失败: {e}"),
@@ -289,6 +311,24 @@ pub async fn run_agent_loop(
             let choice = match llm_response.choices.first() {
                 Some(c) => c,
                 None => {
+                    if !all_artifacts.is_empty() {
+                        let summary = artifact_fallback_summary(all_artifacts.len());
+                        warn!(
+                            "[AgentLoop] follow-up returned an empty response after artifacts were generated; using fallback summary"
+                        );
+                        let _ = tx
+                            .send(AgentEvent::Message {
+                                content: summary.clone(),
+                            })
+                            .await;
+                        let _ = tx
+                            .send(AgentEvent::Done {
+                                summary,
+                                artifacts: all_artifacts,
+                            })
+                            .await;
+                        return;
+                    }
                     let _ = tx
                         .send(AgentEvent::Error {
                             message: "LLM 返回空响应".to_string(),
@@ -527,10 +567,7 @@ pub async fn run_agent_loop(
                 let summary = if all_artifacts.is_empty() {
                     format!("已完成 {max_turns} 轮工具调用，但总结生成失败: {e}")
                 } else {
-                    format!(
-                        "已完成任务，已生成 {} 个产物，但总结生成失败，请查看右侧成果区。",
-                        all_artifacts.len()
-                    )
+                    artifact_fallback_summary(all_artifacts.len())
                 };
                 let _ = tx
                     .send(AgentEvent::Message {
@@ -552,10 +589,7 @@ pub async fn run_agent_loop(
                 let summary = if all_artifacts.is_empty() {
                     "任务已完成，但总结响应超时。".to_string()
                 } else {
-                    format!(
-                        "已完成任务，已生成 {} 个产物，请查看右侧成果区。",
-                        all_artifacts.len()
-                    )
+                    artifact_fallback_summary(all_artifacts.len())
                 };
                 let _ = tx
                     .send(AgentEvent::Message {
@@ -589,4 +623,17 @@ fn map_artifact_to_tool_kind(kind: &str) -> String {
         _ => "general",
     }
     .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::artifact_fallback_summary;
+
+    #[test]
+    fn artifact_fallback_summary_keeps_artifact_count_and_next_step() {
+        let summary = artifact_fallback_summary(2);
+
+        assert!(summary.contains("已生成 2 个产物"));
+        assert!(summary.contains("查看右侧成果区"));
+    }
 }

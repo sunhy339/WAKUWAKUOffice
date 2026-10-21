@@ -174,6 +174,18 @@ pub async fn resolve_video_route(
     user_id: &str,
     preferred_model: Option<&str>,
 ) -> Result<AgnesModelRoute> {
+    resolve_video_routes(user_id, preferred_model)
+        .await?
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow!("未配置视频模型"))
+}
+
+/// 返回按优先级排列的视频模型候选，供视频任务在协议错误或限流时回退。
+pub async fn resolve_video_routes(
+    user_id: &str,
+    preferred_model: Option<&str>,
+) -> Result<Vec<AgnesModelRoute>> {
     if let Some(routes) = resolve_user_media_routes(
         user_id,
         preferred_model,
@@ -182,9 +194,7 @@ pub async fn resolve_video_route(
     )
     .await?
     {
-        if let Some(route) = routes.into_iter().next() {
-            return Ok(route);
-        }
+        return Ok(routes);
     }
 
     let config = crate::config::config();
@@ -199,18 +209,20 @@ pub async fn resolve_video_route(
     } else {
         config.llm_video_models.clone()
     };
-    let model = order_configured_models(models, preferred_model)
+    let routes = order_configured_models(models, preferred_model)
         .into_iter()
-        .next()
-        .unwrap_or_default();
-    if model.is_empty() {
+        .map(|model| model.trim().to_string())
+        .filter(|model| !model.is_empty())
+        .map(|model| AgnesModelRoute {
+            credentials: credentials.clone(),
+            model,
+            profile_id: None,
+        })
+        .collect::<Vec<_>>();
+    if routes.is_empty() {
         return Err(anyhow!("未配置视频模型名"));
     }
-    Ok(AgnesModelRoute {
-        credentials,
-        model,
-        profile_id: None,
-    })
+    Ok(routes)
 }
 
 async fn resolve_user_media_routes(

@@ -1,7 +1,8 @@
-import { Check, Cpu, Eye, EyeOff, KeyRound, Plus, RefreshCw, SlidersHorizontal, Trash2, X } from 'lucide-react'
+import { Check, Cpu, Eye, EyeOff, Image, KeyRound, Layers3, MessageSquare, Plus, RefreshCw, ScanSearch, SlidersHorizontal, Trash2, Video, X } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { settingsApi } from '@/api'
 import type { AppSettings, LLMModelConfig, LLMProfile, MCPServiceConfig, ModelCapability } from '@/types'
+import { routeModelsForCapability } from '@/lib/model-capabilities'
 
 interface SettingsDialogProps {
   open: boolean
@@ -31,6 +32,14 @@ const capabilityOptions: Array<{ value: ModelCapability; label: string }> = [
   { value: 'image_generation', label: '文生图' },
   { value: 'image_edit', label: '图生图' },
   { value: 'video_generation', label: '视频' },
+]
+
+const routePreviewOptions: Array<{ capability: ModelCapability; label: string; description: string; Icon: typeof MessageSquare }> = [
+  { capability: 'text', label: '普通对话', description: '文本回答与日常交流', Icon: MessageSquare },
+  { capability: 'vision', label: '识图分析', description: '图片理解、OCR 与截图分析', Icon: ScanSearch },
+  { capability: 'image_generation', label: '文生图', description: '根据描述生成图片', Icon: Image },
+  { capability: 'image_edit', label: '图生图', description: '使用参考图进行编辑', Icon: Layers3 },
+  { capability: 'video_generation', label: '视频生成', description: '文生视频与图生视频', Icon: Video },
 ]
 
 function legacyModelCapabilities(model: string): ModelCapability[] {
@@ -282,6 +291,12 @@ export function SettingsDialog({ open, settings, onClose, onSave }: SettingsDial
   }
 
   const activeProfile = draft.llm_profiles.find((profile) => profile.id === draft.active_profile_id) || draft.llm_profiles[0]
+  const routePreview = activeProfile
+    ? routePreviewOptions.map((item) => ({
+      ...item,
+      models: routeModelsForCapability(activeProfile, draft.active_model, item.capability),
+    }))
+    : []
 
   return (
     <div className="h-full overflow-hidden bg-transparent p-5">
@@ -357,6 +372,47 @@ export function SettingsDialog({ open, settings, onClose, onSave }: SettingsDial
                       <option key={model} value={model}>{model}</option>
                     ))}
                   </select>
+                </div>
+              </div>
+
+              <div className="mb-5 rounded-[1.5rem] border border-violet-200/70 bg-violet-50/55 p-4">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <div className="text-sm font-bold text-violet-950">当前能力路由</div>
+                    <p className="mt-1 text-xs leading-5 text-violet-900/65">
+                      按当前模型、默认模型和优先级预览实际候选顺序。真正执行时服务端仍会再次校验能力和可用状态。
+                    </p>
+                  </div>
+                  <span className="shrink-0 rounded-full bg-white/80 px-2.5 py-1 text-[10px] font-semibold text-violet-700">
+                    {activeProfile?.name || '当前服务'}
+                  </span>
+                </div>
+                <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
+                  {routePreview.map(({ capability, label, description, Icon, models }) => (
+                    <div key={capability} className="min-w-0 rounded-2xl border border-violet-100 bg-white/80 p-3">
+                      <div className="flex items-center gap-2 text-xs font-bold text-surface-800">
+                        <Icon className="h-4 w-4 text-violet-600" />
+                        {label}
+                      </div>
+                      <div className="mt-1 text-[10px] leading-4 text-surface-400">{description}</div>
+                      {models.length > 0 ? (
+                        <>
+                          <div className="mt-2 truncate rounded-lg bg-surface-950 px-2 py-1.5 font-mono text-[10px] font-semibold text-white" title={models[0]}>
+                            {models[0]}
+                          </div>
+                          {models.length > 1 && (
+                            <div className="mt-1 truncate text-[10px] text-surface-400" title={models.slice(1).join(' → ')}>
+                              备用：{models.slice(1).join(' → ')}
+                            </div>
+                          )}
+                        </>
+                      ) : (
+                        <div className="mt-2 rounded-lg bg-amber-50 px-2 py-1.5 text-[10px] font-semibold text-amber-700">
+                          未配置可用模型
+                        </div>
+                      )}
+                    </div>
+                  ))}
                 </div>
               </div>
 

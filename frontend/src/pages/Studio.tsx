@@ -86,55 +86,135 @@ function buildRestoredArtifacts(session: PersistedSession, artifacts: Artifact[]
   return restored
 }
 
-function buildHistoryProcessLogs(session: PersistedSession) {
+function safeProcessDetail(detail?: string, limit = 160) {
+  const normalized = detail?.replace(/\s+/g, ' ').trim()
+  return normalized ? normalized.slice(0, limit) : undefined
+}
+
+function compactProcessEvents(events: SessionProcessEvent[]) {
+  return events.reduce<SessionProcessEvent[]>((result, event) => {
+    const previous = result[result.length - 1]
+    const isDuplicate = previous
+      && previous.kind === event.kind
+      && previous.title === event.title
+      && previous.tool === event.tool
+    if (isDuplicate) {
+      result[result.length - 1] = {
+        ...previous,
+        detail: event.detail || previous.detail,
+        status: event.status || previous.status,
+        at: event.at || previous.at,
+      }
+      return result
+    }
+    result.push(event)
+    return result
+  }, []).slice(-32)
+}
+
+/**
+ * 恢复用户可见的执行摘要，不恢复模型原始隐藏推理或完整工具入参。
+ * 旧会话没有 process_events 时，从已保存的消息和工具调用生成兼容摘要。
+ */
+function buildHistoryProcessEvents(session: PersistedSession): SessionProcessEvent[] {
   const persistedEvents = Array.isArray(session.process_events) ? session.process_events : []
   if (persistedEvents.length > 0) {
-    return [
-      '已恢复历史会话',
-      ...persistedEvents.map(formatPersistedProcessEvent),
-    ]
+    const events = persistedEvents.map((event) => {
+      const isThinking = event.kind === 'thinking' || /^(Agent )?思考中$|分析摘要/.test(event.title)
+      const isToolCall = event.kind === 'tool' && /^调用工具/.test(event.title)
+      return {
+        ...event,
+        title: isThinking ? '分析需求' : event.title,
+        // 只显示可复查的阶段摘要；隐藏原始思考文本和工具调用 JSON。
+        detail: isThinking || isToolCall ? undefined : safeProcessDetail(event.detail),
+      }
+    })
+    if (session.artifacts?.length && !events.some((event) => event.kind === 'artifact')) {
+      events.push({
+        kind: 'artifact',
+        title: '产物汇总',
+        detail: `已生成 ${session.artifacts.length} 个产物`,
+        status: 'success',
+        at: session.updated_at,
+      })
+    }
+    return compactProcessEvents(events)
   }
 
-  // 会话标题通常来自用户的完整首条提示词。恢复状态只需要说明动作结果，
-  // 不能把整段提示词再次放进过程日志，否则历史消息会在对话区重复显示。
-  const logs: string[] = ['已恢复历史会话']
+  const events: SessionProcessEvent[] = [{
+    kind: 'state',
+    title: '已恢复历史会话',
+    status: 'success',
+    at: session.updated_at,
+  }]
 
   for (const msg of session.messages || []) {
     if (msg.role === 'assistant' && Array.isArray(msg.tool_calls)) {
       for (const call of msg.tool_calls) {
         const toolName = call?.function?.name
-        if (toolName) logs.push(`调用工具：${toolName}`)
+        if (toolName) {
+          events.push({
+            kind: 'tool',
+            title: `调用工具: ${toolName}`,
+            status: 'success',
+            tool: toolName,
+            at: msg.created_at || session.updated_at,
+          })
+        }
       }
       continue
     }
 
     if (msg.role === 'tool' && msg.content) {
+      let detail = ''
+      let failed = false
       try {
         const payload = JSON.parse(msg.content)
-        const detail = payload?.observation || payload?.error || ''
-        if (detail) {
-          logs.push(`工具执行：${String(detail).slice(0, 120)}`)
-        }
+        detail = String(payload?.observation || payload?.error || '')
+        failed = Boolean(payload?.error)
       } catch {
-        logs.push(`工具执行：${msg.content.slice(0, 120)}`)
+        detail = msg.content
       }
+      events.push({
+        kind: failed ? 'error' : 'tool',
+        title: failed ? '工具执行失败' : '工具执行完成',
+        detail: safeProcessDetail(detail),
+        status: failed ? 'error' : 'success',
+        at: msg.created_at || session.updated_at,
+      })
     }
   }
 
   if (session.artifacts?.length) {
-    logs.push(`产物汇总：已生成 ${session.artifacts.length} 个产物`)
+    events.push({
+      kind: 'artifact',
+      title: '产物汇总',
+      detail: `已生成 ${session.artifacts.length} 个产物`,
+      status: 'success',
+      at: session.updated_at,
+    })
   } else if (session.summary?.trim()) {
-    logs.push(`对话总结：${session.summary.slice(0, 120)}`)
+    events.push({
+      kind: 'state',
+      title: '对话总结',
+      detail: safeProcessDetail(session.summary),
+      status: 'success',
+      at: session.updated_at,
+    })
   }
 
-  return logs
+  return compactProcessEvents(events)
+}
+
+function buildHistoryProcessLogs(session: PersistedSession) {
+  return buildHistoryProcessEvents(session).map(formatPersistedProcessEvent)
 }
 
 function formatPersistedProcessEvent(event: SessionProcessEvent) {
-  const detail = event.detail?.trim()
+  const detail = safeProcessDetail(event.detail)
   const withDetail = (title: string) => detail ? `${title}：${detail}` : title
 
-  if (event.kind === 'thinking') return withDetail('分析摘要')
+  if (event.kind === 'thinking') return withDetail(event.title || '分析需求')
   if (event.kind === 'tool') {
     if (event.status === 'error') {
       return `工具 ${event.tool || event.title} ✗ 失败${detail ? `：${detail}` : ''}`
@@ -230,6 +310,7 @@ export default function Studio() {
   const {
     project, slides, currentSlideIndex, messages,
     isStreaming, sessionId, artifacts, activeArtifactId,
+    processEvents,
     setProject, setSlides, setCurrentSlide,
     addMessage, setStreaming, setSessionId, reset,
     upsertArtifact, updateArtifact, setActiveArtifact,
@@ -837,6 +918,7 @@ export default function Studio() {
 
       const session = res.data as PersistedSession
       const restoredMessages = buildRestoredMessages(session)
+      const restoredProcessEvents = buildHistoryProcessEvents(session)
       const restoredProcessLogs = buildHistoryProcessLogs(session)
       const restoredTabId = targetTabId
       const tool = session.tool_kind || conversation?.tool || 'general'
@@ -859,6 +941,7 @@ export default function Studio() {
         streamPhase: 'done',
         streamStatus: '已恢复历史会话',
         processLogs: restoredProcessLogs,
+        processEvents: restoredProcessEvents,
         input: '',
         attachments: [],
         inputRefs: [],
@@ -970,6 +1053,7 @@ export default function Studio() {
             activeArtifactId: restoredArtifacts.find((artifact) => artifact.content?.mermaid)?.id || restoredArtifacts[0]?.id || null,
             activeProjectId,
             processLogs: restoredProcessLogsWithArtifacts,
+            processEvents: buildHistoryProcessEvents(artifactSession),
           })
           setTabUiState((prev) => ({
             ...prev,
@@ -1625,6 +1709,7 @@ export default function Studio() {
         isStreaming: true,
         streamPhase: 'thinking',
         streamStatus: pendingAttachments.length > 0 ? '正在整理消息与附件...' : '正在理解需求...',
+        processEvents: [],
         activeTool: inferredTool,
         tabTitle: message.slice(0, 24) || '新对话',
       })
@@ -2500,6 +2585,7 @@ export default function Studio() {
                 streamStatus={streamStatus}
                 streamPhase={streamPhase}
                 processLogs={processLogs}
+                processEvents={processEvents}
                 traceEvents={[]}
                 selectedTheme={selectedTheme}
                 activeTool={activeTool}

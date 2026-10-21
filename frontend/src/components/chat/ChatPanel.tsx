@@ -5,7 +5,7 @@ import { AlertCircle, Check, Circle, Download, Eye, Files, Loader2, Send, Sparkl
 import { AGENT_TOOLS, getAgentTool } from '@/config/agent-tools'
 import { useRef, useState, useEffect, Fragment, useMemo } from 'react'
 import { FilePickerPanel } from './FilePickerPanel'
-import type { AgentTraceEvent, Artifact, ChatAttachment, ChatMessage, InputRef, LLMProfile, PPTProject, ToolKind, ToolConfigMap } from '@/types'
+import type { AgentTraceEvent, Artifact, ChatAttachment, ChatMessage, InputRef, LLMProfile, PPTProject, SessionProcessEvent, ToolKind, ToolConfigMap } from '@/types'
 import { findArtifactTurnGroup, groupArtifactsByTurn } from '@/lib/artifact-turns'
 import { ToolConfigDropdown } from './ToolConfigDropdown'
 import { chatModelsFromProfiles } from '@/lib/model-capabilities'
@@ -18,6 +18,7 @@ interface ChatPanelProps {
   streamStatus: string
   streamPhase: 'idle' | 'thinking' | 'generating' | 'finishing' | 'done' | 'error'
   processLogs: string[]
+  processEvents?: SessionProcessEvent[]
   traceEvents: AgentTraceEvent[]
   selectedTheme: string
   activeTool: ToolKind
@@ -286,6 +287,32 @@ function parseLogEntry(log: string, idx: number): ParsedLog {
   return { id: idx, icon: Circle, title: log, detail: '', status: 'running' }
 }
 
+function parseProcessEvent(event: SessionProcessEvent, idx: number): ParsedLog {
+  const isToolCall = event.kind === 'tool' && /^调用工具/.test(event.title)
+  const toolName = event.tool || event.title.replace(/^调用工具[:：]?\s*/, '')
+  const Icon = event.kind === 'tool'
+    ? (toolIcon[toolName as ToolKind] || Wrench)
+    : event.kind === 'artifact'
+      ? FileEdit
+      : event.kind === 'error'
+        ? AlertCircle
+        : event.kind === 'thinking'
+          ? Brain
+          : Circle
+  const title = isToolCall ? `调用 ${toolName}` : event.title
+  const status: LogStatus = event.status === 'error' ? 'error' : event.status === 'running' ? 'running' : 'done'
+  return {
+    id: idx,
+    icon: Icon,
+    title,
+    detail: event.detail || '',
+    status,
+    highlight: event.kind === 'artifact',
+    isTool: event.kind === 'tool',
+    toolName: event.tool || (isToolCall ? toolName : undefined),
+  }
+}
+
 // 动态导入 Brain 图标（lucide 没有导出 Brain，用 BrainCircuit 代替）
 import { BrainCircuit as Brain } from 'lucide-react'
 
@@ -297,6 +324,7 @@ export function ChatPanel({
   streamStatus,
   streamPhase,
   processLogs,
+  processEvents = [],
   traceEvents,
   selectedTheme,
   activeTool,
@@ -347,8 +375,14 @@ export function ChatPanel({
       setProcessPanelExpanded(true)
       return
     }
+    if (processEvents.length > 0) {
+      // 历史会话的过程摘要是恢复结果的一部分，默认展开，避免只看到
+      // “已恢复历史会话”而误以为消息或过程没有加载出来。
+      setProcessPanelExpanded(true)
+      return
+    }
     if (streamPhase === 'done' || streamPhase === 'error') setProcessPanelExpanded(false)
-  }, [isStreaming, streamPhase])
+  }, [isStreaming, streamPhase, processEvents.length])
 
   useEffect(() => {
     if (isStreaming && artifacts.length > previousArtifactsLengthRef.current) {
@@ -463,9 +497,11 @@ export function ChatPanel({
   }
 
   // 解析日志
-  const parsedLogs: ParsedLog[] = processLogs.map((log, idx) => parseLogEntry(log, idx))
+  const parsedLogs: ParsedLog[] = processEvents.length > 0
+    ? processEvents.map(parseProcessEvent)
+    : processLogs.map((log, idx) => parseLogEntry(log, idx))
   // 最后一条如果是 running 状态且正在流式，保持 running；否则标记 done
-  const visibleLogs = parsedLogs.slice(-8)
+  const visibleLogs = parsedLogs.slice(-16)
 
   // 判断阶段
   const phaseConfig = [
@@ -477,7 +513,7 @@ export function ChatPanel({
 
   const selectableModels = chatModelsFromProfiles(modelProfiles)
 
-  const showProcessPanel = isStreaming || traceEvents.length > 0 || processLogs.length > 0
+  const showProcessPanel = isStreaming || traceEvents.length > 0 || processLogs.length > 0 || processEvents.length > 0
   const artifactMeta: Record<string, { icon: typeof Bot; label: string; exportLabel?: string }> = {
     ppt: { icon: LayoutDashboard, label: 'PPT', exportLabel: '导出 PPTX' },
     document: { icon: FileEdit, label: 'Word 文档', exportLabel: '导出 DOCX' },

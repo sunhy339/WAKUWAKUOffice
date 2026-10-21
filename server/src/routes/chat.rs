@@ -96,16 +96,23 @@ fn process_event_from_agent_event(event: &AgentEvent) -> Option<SessionProcessEv
     match event {
         AgentEvent::Thinking { content } => Some(SessionProcessEvent {
             kind: "thinking".to_string(),
-            title: "分析摘要".to_string(),
-            detail: truncate_process_detail(content, 200),
+            title: "分析需求".to_string(),
+            // 不持久化模型原始思考文本。这里的过程记录只用于说明阶段，
+            // 不是模型隐藏推理链的回放。
+            detail: if content.trim().is_empty() {
+                None
+            } else {
+                Some("已完成需求理解".to_string())
+            },
             status: "success".to_string(),
             tool: None,
             at,
         }),
-        AgentEvent::ToolCall { tool, input } => Some(SessionProcessEvent {
+        AgentEvent::ToolCall { tool, input: _ } => Some(SessionProcessEvent {
             kind: "tool".to_string(),
             title: format!("调用工具: {tool}"),
-            detail: truncate_process_detail(&serde_json::to_string(input).unwrap_or_default(), 200),
+            // 工具入参可能包含附件内容、引用内容或敏感配置，只保存工具名。
+            detail: None,
             status: "running".to_string(),
             tool: Some(tool.clone()),
             at,
@@ -1331,16 +1338,16 @@ async fn chat_stream(
                 AgentEvent::Thinking { content } => {
                     Event::default().event("state_update").data(serde_json::json!({
                         "phase": "running",
-                        "step": "Agent 思考中",
-                        "detail": content,
+                        "step": "分析需求",
+                        "detail": if content.trim().is_empty() { "正在分析请求" } else { "已完成需求理解" },
                         "at": chrono::Utc::now().to_rfc3339(),
                     }).to_string())
                 }
-                AgentEvent::ToolCall { tool, input } => {
+                AgentEvent::ToolCall { tool, input: _ } => {
                     Event::default().event("state_update").data(serde_json::json!({
                         "phase": "running",
                         "step": format!("调用工具: {tool}"),
-                        "detail": serde_json::to_string(input).unwrap_or_default().chars().take(200).collect::<String>(),
+                        "detail": format!("已选择 {tool} 执行"),
                         "at": chrono::Utc::now().to_rfc3339(),
                     }).to_string())
                 }
@@ -1480,4 +1487,27 @@ async fn chat_stream(
 
     let stream = ReceiverStream::new(sse_rx);
     Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn persisted_process_events_keep_only_user_visible_summaries() {
+        let thinking = process_event_from_agent_event(&AgentEvent::Thinking {
+            content: "模型内部分析：不要把这段内容持久化".to_string(),
+        })
+        .expect("thinking event should be converted");
+        assert_eq!(thinking.title, "分析需求");
+        assert_eq!(thinking.detail.as_deref(), Some("已完成需求理解"));
+
+        let tool_call = process_event_from_agent_event(&AgentEvent::ToolCall {
+            tool: "image_prompt".to_string(),
+            input: serde_json::json!({"prompt": "private input", "api_key": "redacted"}),
+        })
+        .expect("tool call should be converted");
+        assert_eq!(tool_call.tool.as_deref(), Some("image_prompt"));
+        assert!(tool_call.detail.is_none());
+    }
 }

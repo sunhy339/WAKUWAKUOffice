@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { Artifact, PPTProject, Slide, ChatMessage, ChatStreamPhase, ToolKind, InputRef } from '@/types';
+import type { Artifact, PPTProject, Slide, ChatMessage, ChatStreamPhase, ToolKind, InputRef, SessionProcessEvent } from '@/types';
 
 interface ConversationState {
   project: PPTProject | null;
@@ -16,6 +16,7 @@ interface ConversationState {
   streamStatus: string;
   streamPhase: ChatStreamPhase;
   processLogs: string[];
+  processEvents: SessionProcessEvent[];
   attachments: any[];
   inputRefs: InputRef[];
   selectedTheme: string;
@@ -50,6 +51,7 @@ interface PPTState {
   sessionId: string | null;
   artifacts: Artifact[];
   activeArtifactId: string | null;
+  processEvents: SessionProcessEvent[];
 
   // Tab 管理
   openTab: (tabId: string, initialState?: Partial<ConversationState>) => void;
@@ -100,6 +102,7 @@ function createInitialTabState(tabId: string, overrides?: Partial<ConversationSt
     streamStatus: '空闲',
     streamPhase: 'idle',
     processLogs: [],
+    processEvents: [],
     attachments: [],
     inputRefs: [],
     selectedTheme: 'default',
@@ -125,6 +128,7 @@ function syncFromTab(state: PPTState, tabId: string): Partial<PPTState> {
     sessionId: tab.sessionId,
     artifacts: tab.artifacts,
     activeArtifactId: tab.activeArtifactId,
+    processEvents: tab.processEvents || [],
   };
 }
 
@@ -141,6 +145,7 @@ export const usePPTStore = create<PPTState>((set, get) => ({
   sessionId: null,
   artifacts: [],
   activeArtifactId: null,
+  processEvents: [],
 
   openTab: (tabId, initialState) => {
     set((state) => {
@@ -177,6 +182,7 @@ export const usePPTStore = create<PPTState>((set, get) => ({
           sessionId: null,
           artifacts: [],
           activeArtifactId: null,
+          processEvents: [],
         };
       }
 
@@ -426,7 +432,7 @@ export const usePPTStore = create<PPTState>((set, get) => ({
         return {
           project: null, slides: [], currentSlideIndex: 0, messages: [],
           isGenerating: false, isStreaming: false, sessionId: null,
-          artifacts: [], activeArtifactId: null,
+          artifacts: [], activeArtifactId: null, processEvents: [],
         };
       }
       const tabId = state.activeTabId;
@@ -435,15 +441,15 @@ export const usePPTStore = create<PPTState>((set, get) => ({
         return {
           project: null, slides: [], currentSlideIndex: 0, messages: [],
           isGenerating: false, isStreaming: false, sessionId: null,
-          artifacts: [], activeArtifactId: null,
+          artifacts: [], activeArtifactId: null, processEvents: [],
         };
       }
-      const resetTab = { ...tab, project: null, slides: [], currentSlideIndex: 0, messages: [], isGenerating: false, isStreaming: false, sessionId: null, artifacts: [], activeArtifactId: null };
+      const resetTab = { ...tab, project: null, slides: [], currentSlideIndex: 0, messages: [], isGenerating: false, isStreaming: false, sessionId: null, artifacts: [], activeArtifactId: null, processEvents: [] };
       return {
         tabs: { ...state.tabs, [tabId]: resetTab },
         project: null, slides: [], currentSlideIndex: 0, messages: [],
         isGenerating: false, isStreaming: false, sessionId: null,
-        artifacts: [], activeArtifactId: null,
+        artifacts: [], activeArtifactId: null, processEvents: [],
       };
     });
   },

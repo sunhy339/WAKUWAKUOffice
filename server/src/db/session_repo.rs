@@ -363,13 +363,20 @@ pub async fn get_artifacts(pool: &DbPool, session_id: &str) -> AppResult<Vec<Art
 pub async fn get_session_detail(
     pool: &DbPool,
     session_id: &str,
+    include_artifacts: bool,
 ) -> AppResult<Option<SessionDetail>> {
     let session = match find_by_id(pool, session_id).await? {
         Some(session) => session,
         None => return Ok(None),
     };
     let messages = get_persisted_messages(pool, session_id, 100).await?;
-    let artifacts = get_artifacts(pool, session_id).await?;
+    // Image/video artifacts may contain large base64 payloads. Keep them out of
+    // the fast history response so messages and process events can render first.
+    let artifacts = if include_artifacts {
+        get_artifacts(pool, session_id).await?
+    } else {
+        Vec::new()
+    };
     let process_events = get_process_events(pool, session_id).await?;
     Ok(Some(SessionDetail {
         id: session.id,

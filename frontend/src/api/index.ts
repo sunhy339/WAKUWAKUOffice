@@ -65,7 +65,10 @@ export const pptApi = {
 export const sessionApi = {
   listSessions: (params?: { q?: string; page?: number; page_size?: number }) =>
     api.get('/chat/sessions', { params }),
-  getSession: (id: string) => api.get<PersistedSession>(`/chat/session/${id}`),
+  getSession: (id: string, signal?: AbortSignal, includeArtifacts = false) =>
+    api.get<PersistedSession>(`/chat/session/${id}`, { signal, params: { include_artifacts: includeArtifacts } }),
+  getSessionArtifacts: (id: string, signal?: AbortSignal) =>
+    api.get<{ artifacts: Artifact[] }>(`/chat/session/${id}/artifacts`, { signal }),
   updateSession: (id: string, updates: { title?: string; project_id?: string | null; order_col?: number }) => api.patch(`/chat/session/${id}`, updates),
   deleteSession: (id: string) => api.delete(`/chat/session/${id}`),
 };

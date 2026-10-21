@@ -59,6 +59,33 @@ function buildRestoredMessages(session: PersistedSession) {
   return restored
 }
 
+function buildRestoredArtifacts(session: PersistedSession, artifacts: Artifact[]) {
+  const restored = [...artifacts]
+  // 兼容旧会话：早期 draw.io 服务失败时只把 Mermaid 源码写进了
+  // assistant 消息，没有保存 Artifact。恢复时补出临时预览产物，既不
+  // 改写历史事实，也能让用户继续看到之前已经生成的流程图。
+  if (!restored.some((artifact) => artifact.kind === 'drawio')) {
+    const legacyMermaid = [...(session.messages || [])]
+      .reverse()
+      .find((message) => message.role === 'assistant')
+    const mermaidSource = legacyMermaid ? extractMermaidSource(legacyMermaid.content) : null
+    if (mermaidSource) {
+      restored.push({
+        id: `legacy-mermaid-${session.id}`,
+        kind: 'drawio',
+        tool_kind: 'drawio',
+        title: session.title || '流程图',
+        status: 'ready',
+        content: { type: 'mermaid', format: 'mermaid', mermaid: mermaidSource },
+        version: 1,
+        created_at: session.updated_at,
+        updated_at: session.updated_at,
+      })
+    }
+  }
+  return restored
+}
+
 function buildHistoryProcessLogs(session: PersistedSession) {
   const persistedEvents = Array.isArray(session.process_events) ? session.process_events : []
   if (persistedEvents.length > 0) {
@@ -268,6 +295,9 @@ export default function Studio() {
   // 首次从 URL 恢复会话时，空白首个 Tab 的 sessionId 不能抢先把 URL
   // 清掉；否则历史详情还没写入 Tab，就会丢失 ?s= 会话定位参数。
   const initialSessionRestoreRef = useRef<boolean | null>(null)
+  // 历史详情只允许当前一次加载占用恢复状态；切换会话时主动中止旧请求，
+  // 避免大体积产物响应长期占用网络并让界面停留在恢复中。
+  const historyRestoreControllerRef = useRef<AbortController | null>(null)
 
   // 右侧展示区只是当前 tab 的 UI 状态，不能让后台任务的事件污染当前活跃 tab。
   // 这里保留一个显式的 tab 级写入口，供 SSE 回调更新发起请求的 tab。
@@ -421,9 +451,8 @@ export default function Studio() {
         } else {
           // 如果会话列表没带产物详情，尝试加载会话详情
           try {
-            const detail = await sessionApi.getSession(session.id)
-            const detailData = detail.data as any
-            const sessionArtifacts = detailData?.artifacts || []
+            const detail = await sessionApi.getSessionArtifacts(session.id)
+            const sessionArtifacts = detail.data?.artifacts || []
             for (const artifact of sessionArtifacts) {
               items.push({
                 artifact,
@@ -605,7 +634,9 @@ export default function Studio() {
     setStreamStatus(targetTabState?.streamStatus || targetUi?.streamStatus || '空闲')
     setStreamPhase(targetTabState?.streamPhase || targetUi?.streamPhase || 'idle')
     setProcessLogs(targetTabState?.processLogs?.length ? targetTabState.processLogs : (targetUi?.processLogs || []))
-    setShowArtifactPanel(Boolean(targetUi?.showArtifactPanel || targetTabState?.artifacts.length))
+    // 是否打开预览是用户在该 tab 中的界面选择，不能因为历史会话有产物
+    // 就自动打开；产物恢复后仍可从消息中的“查看产物”入口主动打开。
+    setShowArtifactPanel(Boolean(targetUi?.showArtifactPanel))
     setPptProgress(targetUi?.pptProgress || null)
     setFollowLatestSlide(targetUi?.followLatestSlide ?? true)
 
@@ -692,6 +723,7 @@ export default function Studio() {
     } catch (err) {
       console.error('Delete project error:', err)
       showToast('删除项目失败', 'error')
+      throw err
     }
   }
 
@@ -773,9 +805,17 @@ export default function Studio() {
       })
     }
 
+    historyRestoreControllerRef.current?.abort()
+    const restoreController = new AbortController()
+    historyRestoreControllerRef.current = restoreController
     const loadId = ++conversationLoadRef.current
     const isLatestLoad = () => conversationLoadRef.current === loadId
     const isTargetTabActive = () => usePPTStore.getState().activeTabId === targetTabId
+    let restoreTimedOut = false
+    const restoreTimeoutId = window.setTimeout(() => {
+      restoreTimedOut = true
+      restoreController.abort()
+    }, 30_000)
 
     setRestoringTabId(targetTabId)
     setActiveView('chat')
@@ -790,110 +830,31 @@ export default function Studio() {
     setStreamPhase('thinking')
     setStreamStatus('正在恢复历史会话…')
     setProcessLogs(['正在恢复历史会话'])
+    let artifactLoading = false
     try {
-      const res = await sessionApi.getSession(id)
+      const res = await sessionApi.getSession(id, restoreController.signal)
       if (!isLatestLoad()) return
 
       const session = res.data as PersistedSession
-      const restoredArtifacts = [...(session.artifacts || [])]
-      // 兼容旧会话：早期 draw.io 服务失败时只把 Mermaid 源码写进了
-      // assistant 消息，没有保存 Artifact。恢复时补出临时预览产物，既不
-      // 改写历史事实，也能让用户继续看到之前已经生成的流程图。
-      if (!restoredArtifacts.some((artifact) => artifact.kind === 'drawio')) {
-        const legacyMermaid = [...(session.messages || [])]
-          .reverse()
-          .find((message) => message.role === 'assistant')
-        const mermaidSource = legacyMermaid ? extractMermaidSource(legacyMermaid.content) : null
-        if (mermaidSource) {
-          restoredArtifacts.push({
-            id: `legacy-mermaid-${session.id}`,
-            kind: 'drawio',
-            tool_kind: 'drawio',
-            title: session.title || '流程图',
-            status: 'ready',
-            content: { type: 'mermaid', format: 'mermaid', mermaid: mermaidSource },
-            version: 1,
-            created_at: session.updated_at,
-            updated_at: session.updated_at,
-          })
-        }
-      }
-      const pptArtifact = restoredArtifacts.find((artifact) => artifact.kind === 'ppt')
-      const tool = session.tool_kind || pptArtifact?.tool_kind || 'general'
-
-      let restoredProject: typeof project = null
-      let restoredSlides = [] as typeof slides
-      // project_id 可能是通用项目 ID 也可能是 PPT 项目 ID
-      if (session.project_id) {
-        try {
-          // 先尝试通用项目 API
-          await projectApi.getProject(session.project_id)
-        } catch {
-          // 可能是 PPT 项目 ID（老数据兼容）
-          try {
-            const pptRes = await pptApi.getProject(session.project_id)
-            restoredProject = pptRes.data
-            restoredSlides = pptRes.data.slides || []
-          } catch {
-            // 历史数据可能引用已删除的项目；仍然恢复会话本身。
-          }
-        }
-      }
-
-      // PPT 会话为了兼容通用 projects 表，可能不会把 PPT 项目 ID 写入
-      // sessions.project_id。历史产物本身带有 project_id/slides，此处必须用
-      // 它们恢复右侧预览，否则会出现“文件里有 PPT，右侧空白”的情况。
-      const restoredPptProjectId = pptArtifact?.content?.project_id as string | undefined
-      if (!restoredProject && (tool === 'ppt' || pptArtifact)) {
-        const projectId = restoredPptProjectId || session.project_id
-        if (projectId) {
-          try {
-            const pptRes = await pptApi.getProject(projectId)
-            restoredProject = pptRes.data
-            restoredSlides = pptRes.data.slides || []
-          } catch {
-            // 老数据可能只有产物快照，没有可读取的 PPT 项目文件；继续使用快照。
-          }
-        }
-
-        if (restoredSlides.length === 0 && Array.isArray(pptArtifact?.content?.slides)) {
-          const content = pptArtifact.content
-          restoredSlides = content.slides
-          restoredProject = {
-            id: restoredPptProjectId || pptArtifact!.id,
-            title: content.title || pptArtifact!.title,
-            theme: content.theme || 'default',
-            slides: restoredSlides,
-            history: content.history || [],
-            layout: '16x9',
-            created_at: pptArtifact!.created_at,
-            updated_at: pptArtifact!.updated_at,
-            owner_id: useAuthStore.getState().user?.id,
-          }
-        }
-      }
-
-      if (!isLatestLoad()) return
-
       const restoredMessages = buildRestoredMessages(session)
       const restoredProcessLogs = buildHistoryProcessLogs(session)
       const restoredTabId = targetTabId
+      const tool = session.tool_kind || conversation?.tool || 'general'
 
-      // 必须通过 store 的 tab-aware 入口写入。此前直接 setState 只更新了
-      // 顶层 messages/artifacts，当前 tab 仍保留旧内容；下一次切 tab 时
-      // syncFromTab 会把旧内容重新覆盖回来，表现为“历史会话不对”。
+      // 先写入消息、过程和会话身份。产物可能包含大体积 base64，不能阻塞
+      // 历史对话首屏；右侧预览也不应在打开历史会话时自动抢占主视图。
       restoreTabState(restoredTabId, {
-        project: restoredProject,
-        slides: restoredSlides,
+        project: null,
+        slides: [],
         currentSlideIndex: 0,
         messages: restoredMessages,
-        artifacts: restoredArtifacts,
-        activeArtifactId: restoredArtifacts.find((artifact) => artifact.content?.mermaid)?.id || restoredArtifacts[0]?.id || null,
+        artifacts: [],
+        activeArtifactId: null,
         isGenerating: false,
         isStreaming: false,
         sessionId: session.id,
         activeTool: tool,
-        activeProjectId: restoredProject?.id || session.project_id || restoredPptProjectId || null,
+        activeProjectId: session.project_id || null,
         tabTitle: session.title?.slice(0, 24) || '历史会话',
         streamPhase: 'done',
         streamStatus: '已恢复历史会话',
@@ -905,11 +866,11 @@ export default function Studio() {
 
       if (isTargetTabActive()) {
         setActiveTool(tool)
-        setActiveProjectId(restoredProject?.id || session.project_id || restoredPptProjectId || null)
+        setActiveProjectId(session.project_id || null)
         setInput('')
         setAttachments([])
         setInputRefs([])
-        setShowArtifactPanel(restoredArtifacts.length > 0 || restoredSlides.length > 0 || tool !== 'general')
+        setShowArtifactPanel(false)
         setFollowLatestSlide(false)
         setPptProgress(null)
         setStreamPhase('done')
@@ -931,19 +892,118 @@ export default function Studio() {
             streamPhase: 'done',
             processLogs: restoredProcessLogs,
             activeTool: tool,
-            activeProjectId: restoredProject?.id || session.project_id || restoredPptProjectId || null,
+            activeProjectId: session.project_id || null,
             toolConfig: prev[restoredTabId]?.toolConfig || {},
-            showArtifactPanel: restoredArtifacts.length > 0 || restoredSlides.length > 0 || tool !== 'general',
+            showArtifactPanel: false,
             pptProgress: null,
             followLatestSlide: false,
           },
         }))
       }
+
+      // 产物单独请求。消息已经可读后，图片/PPT 等大数据再异步补回当前 tab；
+      // 切换到其他会话时由同一个 AbortController 取消，避免旧产物覆盖新会话。
+      artifactLoading = true
+      void (async () => {
+        try {
+          const artifactRes = await sessionApi.getSessionArtifacts(id, restoreController.signal)
+          if (!isLatestLoad()) return
+
+          const restoredArtifacts = buildRestoredArtifacts(session, artifactRes.data?.artifacts || [])
+          const pptArtifact = restoredArtifacts.find((artifact) => artifact.kind === 'ppt')
+          let restoredProject: typeof project = null
+          let restoredSlides = [] as typeof slides
+
+          // project_id 可能是通用项目 ID，也可能是 PPT 项目 ID。
+          if (session.project_id) {
+            try {
+              await projectApi.getProject(session.project_id)
+            } catch {
+              try {
+                const pptRes = await pptApi.getProject(session.project_id)
+                restoredProject = pptRes.data
+                restoredSlides = pptRes.data.slides || []
+              } catch {
+                // 历史项目被删除时，仍保留会话和产物。
+              }
+            }
+          }
+
+          // 老 PPT 会话可能只在产物快照中保存项目 ID 和页面数据。
+          const restoredPptProjectId = pptArtifact?.content?.project_id as string | undefined
+          if (!restoredProject && (tool === 'ppt' || pptArtifact)) {
+            const projectId = restoredPptProjectId || session.project_id
+            if (projectId) {
+              try {
+                const pptRes = await pptApi.getProject(projectId)
+                restoredProject = pptRes.data
+                restoredSlides = pptRes.data.slides || []
+              } catch {
+                // 使用下面的快照兜底。
+              }
+            }
+            if (restoredSlides.length === 0 && Array.isArray(pptArtifact?.content?.slides)) {
+              const content = pptArtifact.content
+              restoredSlides = content.slides
+              restoredProject = {
+                id: restoredPptProjectId || pptArtifact!.id,
+                title: content.title || pptArtifact!.title,
+                theme: content.theme || 'default',
+                slides: restoredSlides,
+                history: content.history || [],
+                layout: '16x9',
+                created_at: pptArtifact!.created_at,
+                updated_at: pptArtifact!.updated_at,
+                owner_id: useAuthStore.getState().user?.id,
+              }
+            }
+          }
+
+          if (!isLatestLoad()) return
+          const artifactSession = { ...session, artifacts: restoredArtifacts }
+          const restoredProcessLogsWithArtifacts = buildHistoryProcessLogs(artifactSession)
+          const activeProjectId = restoredProject?.id || session.project_id || restoredPptProjectId || null
+          restoreTabState(restoredTabId, {
+            project: restoredProject,
+            slides: restoredSlides,
+            artifacts: restoredArtifacts,
+            activeArtifactId: restoredArtifacts.find((artifact) => artifact.content?.mermaid)?.id || restoredArtifacts[0]?.id || null,
+            activeProjectId,
+            processLogs: restoredProcessLogsWithArtifacts,
+          })
+          setTabUiState((prev) => ({
+            ...prev,
+            [restoredTabId]: {
+              ...(prev[restoredTabId] || {}),
+              processLogs: restoredProcessLogsWithArtifacts,
+              activeProjectId,
+              // 产物已经恢复，但预览仍由用户主动打开。
+              showArtifactPanel: false,
+            },
+          }))
+          if (isTargetTabActive()) {
+            setActiveProjectId(activeProjectId)
+            setProcessLogs(restoredProcessLogsWithArtifacts)
+            setShowArtifactPanel(false)
+          }
+        } catch (error) {
+          if (!isLatestLoad() || restoreController.signal.aborted) return
+          console.warn('Load history artifacts error:', error)
+          const message = '历史消息已恢复，但产物预览加载失败，请稍后重试'
+          updateTab(restoredTabId, { processLogs: [...restoredProcessLogs, message] })
+          if (isTargetTabActive()) setProcessLogs((logs) => [...logs, message])
+        } finally {
+          artifactLoading = false
+          if (historyRestoreControllerRef.current === restoreController) historyRestoreControllerRef.current = null
+        }
+      })()
     } catch (err) {
       // 旧会话请求失败时也不能覆盖后来已选中的会话状态或弹出误报。
       if (!isLatestLoad()) return
       console.error('Select conversation error:', err)
-      const errMsg = err instanceof Error ? err.message : '未知错误'
+      const errMsg = restoreTimedOut
+        ? '恢复历史会话超时，请稍后重试'
+        : err instanceof Error ? err.message : '未知错误'
       showToast(`恢复历史会话失败：${errMsg}`, 'error')
       updateTab(targetTabId, {
         streamPhase: 'error',
@@ -956,22 +1016,30 @@ export default function Studio() {
         setProcessLogs([`恢复历史会话失败：${errMsg}`])
       }
     } finally {
+      window.clearTimeout(restoreTimeoutId)
+      if (!artifactLoading && historyRestoreControllerRef.current === restoreController) historyRestoreControllerRef.current = null
       setRestoringTabId((current) => current === targetTabId ? null : current)
     }
   }
 
   const handleRenameConversation = async (id: string, title: string) => {
     try {
-      await sessionApi.updateSession(id, { title })
-      refreshConversations()
+      const response = await sessionApi.updateSession(id, { title })
+      if (response.data?.updated === false) throw new Error('会话不存在或没有修改权限')
+      setConversations((items) => items.map((item) => item.id === id ? { ...item, title, updated_at: new Date().toISOString() } : item))
+      const matchingTabs = Object.values(usePPTStore.getState().tabs).filter((tab) => tab.sessionId === id)
+      for (const tab of matchingTabs) updateTab(tab.tabId, { tabTitle: title.slice(0, 24) })
+      await refreshConversations()
+      showToast('会话名称已更新', 'success')
     } catch (err) {
       console.error('Rename conversation error:', err)
-      showToast('修改对话标题失败', 'error')
+      const message = err instanceof Error ? err.message : '修改对话标题失败'
+      showToast(message, 'error')
+      throw err
     }
   }
 
   const handleDeleteConversation = async (id: string) => {
-    if (!confirm('确认删除该对话？此操作不可恢复。')) return
     const deleteState = usePPTStore.getState()
     const deleteTabs = Object.values(deleteState.tabs).filter((tab) => tab.sessionId === id)
     const hasWorkingTab = deleteTabs.some((tab) => tab.isStreaming && tab.streamPhase !== 'done' && tab.streamPhase !== 'error' && tab.streamPhase !== 'idle')
@@ -1032,6 +1100,7 @@ export default function Studio() {
     } catch (err) {
       console.error('Delete conversation error:', err)
       showToast('删除对话失败', 'error')
+      throw err
     }
   }
 

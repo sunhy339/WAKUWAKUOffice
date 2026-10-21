@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     tool_kind TEXT,
     title TEXT NOT NULL,
     summary TEXT,
+    process_events TEXT NOT NULL DEFAULT '[]',
     message_count INTEGER NOT NULL DEFAULT 0,
     order_col INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,

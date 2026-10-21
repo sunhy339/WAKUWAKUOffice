@@ -11,7 +11,7 @@ import { ConversationSidebar } from '@/components/history/ConversationSidebar'
 import { ArtifactPanel } from '@/components/artifacts/ArtifactPanel'
 import { SettingsDialog } from '@/components/settings/SettingsDialog'
 import { AlertCircle, CheckCircle2, Info, Play, X, PanelRightClose, PanelRight, Files, Menu, Settings2 } from 'lucide-react'
-import type { AppSettings, Artifact, ChatAttachment, ChatTargetContext, ChatStreamPhase, ConversationRecord, InputRef, LLMProfile, PersistedSession, ProjectMeta, ToolKind, ToolConfigMap } from '@/types'
+import type { AppSettings, Artifact, ChatAttachment, ChatTargetContext, ChatStreamPhase, ConversationRecord, InputRef, LLMProfile, PersistedSession, ProjectMeta, SessionProcessEvent, ToolKind, ToolConfigMap } from '@/types'
 import { extractArtifactSummary } from '@/lib/artifact-summary'
 import { chatModelsFromProfiles, supportsChatModel } from '@/lib/model-capabilities'
 const LOGO_URL = '/logo.png'
@@ -59,6 +59,14 @@ function buildRestoredMessages(session: PersistedSession) {
 }
 
 function buildHistoryProcessLogs(session: PersistedSession) {
+  const persistedEvents = Array.isArray(session.process_events) ? session.process_events : []
+  if (persistedEvents.length > 0) {
+    return [
+      '已恢复历史会话',
+      ...persistedEvents.map(formatPersistedProcessEvent),
+    ]
+  }
+
   // 会话标题通常来自用户的完整首条提示词。恢复状态只需要说明动作结果，
   // 不能把整段提示词再次放进过程日志，否则历史消息会在对话区重复显示。
   const logs: string[] = ['已恢复历史会话']
@@ -92,6 +100,23 @@ function buildHistoryProcessLogs(session: PersistedSession) {
   }
 
   return logs
+}
+
+function formatPersistedProcessEvent(event: SessionProcessEvent) {
+  const detail = event.detail?.trim()
+  const withDetail = (title: string) => detail ? `${title}：${detail}` : title
+
+  if (event.kind === 'thinking') return withDetail('分析摘要')
+  if (event.kind === 'tool') {
+    if (event.status === 'error') {
+      return `工具 ${event.tool || event.title} ✗ 失败${detail ? `：${detail}` : ''}`
+    }
+    if (event.title.startsWith('调用工具')) return withDetail(event.title)
+    return `工具 ${event.tool || event.title} ✓ 完成${detail ? `：${detail}` : ''}`
+  }
+  if (event.kind === 'artifact') return withDetail('产物生成')
+  if (event.kind === 'error') return withDetail('任务失败')
+  return withDetail(event.title)
 }
 
 const IMAGE_ATTACHMENT_MAX_EDGE = 1600

@@ -55,6 +55,7 @@ CREATE TABLE sessions (
     tool_kind VARCHAR(100),
     title VARCHAR(500) NOT NULL,
     summary VARCHAR(2000),
+    process_events LONGTEXT NULL,
     message_count INT NOT NULL DEFAULT 0,
     order_col BIGINT NOT NULL DEFAULT 0,
     created_at VARCHAR(50) NOT NULL,

@@ -1,6 +1,6 @@
 use super::DbPool;
 use crate::error::AppResult;
-use crate::models::{Artifact, ChatMessage, PersistedChatMessage};
+use crate::models::{Artifact, ChatMessage, PersistedChatMessage, SessionProcessEvent};
 use serde::{Deserialize, Serialize};
 use sqlx::any::AnyRow;
 use sqlx::Row;
@@ -49,6 +49,7 @@ pub struct SessionDetail {
     pub tool_kind: Option<String>,
     pub title: String,
     pub summary: Option<String>,
+    pub process_events: Vec<SessionProcessEvent>,
     pub message_count: i64,
     pub order_col: i64,
     pub created_at: String,
@@ -369,6 +370,7 @@ pub async fn get_session_detail(
     };
     let messages = get_persisted_messages(pool, session_id, 100).await?;
     let artifacts = get_artifacts(pool, session_id).await?;
+    let process_events = get_process_events(pool, session_id).await?;
     Ok(Some(SessionDetail {
         id: session.id,
         owner_id: session.owner_id,
@@ -376,6 +378,7 @@ pub async fn get_session_detail(
         tool_kind: session.tool_kind,
         title: session.title,
         summary: session.summary,
+        process_events,
         message_count: session.message_count,
         order_col: session.order_col,
         created_at: session.created_at,
@@ -383,6 +386,49 @@ pub async fn get_session_detail(
         messages,
         artifacts,
     }))
+}
+
+pub async fn get_process_events(
+    pool: &DbPool,
+    session_id: &str,
+) -> AppResult<Vec<SessionProcessEvent>> {
+    let row = sqlx::query("SELECT process_events FROM sessions WHERE id = ?")
+        .bind(session_id)
+        .fetch_optional(pool)
+        .await?;
+
+    let Some(row) = row else {
+        return Ok(Vec::new());
+    };
+
+    let payload = read_optional_text(&row, 0)?.unwrap_or_else(|| "[]".to_string());
+    match serde_json::from_str::<Vec<SessionProcessEvent>>(&payload) {
+        Ok(events) => Ok(events),
+        Err(error) => {
+            tracing::warn!(
+                "[Sessions] invalid process_events for {}: {}",
+                session_id,
+                error
+            );
+            Ok(Vec::new())
+        }
+    }
+}
+
+pub async fn save_process_events(
+    pool: &DbPool,
+    session_id: &str,
+    events: &[SessionProcessEvent],
+) -> AppResult<()> {
+    let payload = serde_json::to_string(events)?;
+    let now = chrono::Utc::now().to_rfc3339();
+    sqlx::query("UPDATE sessions SET process_events = ?, updated_at = ? WHERE id = ?")
+        .bind(&payload)
+        .bind(&now)
+        .bind(session_id)
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 pub async fn add_message(pool: &DbPool, session_id: &str, msg: &ChatMessage) -> AppResult<()> {
@@ -530,10 +576,13 @@ pub async fn clear_messages(pool: &DbPool, session_id: &str, owner_id: &str) -> 
         .await?;
 
     let now = chrono::Utc::now().to_rfc3339();
-    sqlx::query("UPDATE sessions SET message_count = 0, updated_at = ? WHERE id = ?")
-        .bind(&now)
-        .bind(session_id)
-        .execute(pool)
-        .await?;
+    sqlx::query(
+        "UPDATE sessions SET message_count = 0, process_events = ?, updated_at = ? WHERE id = ?",
+    )
+    .bind("[]")
+    .bind(&now)
+    .bind(session_id)
+    .execute(pool)
+    .await?;
     Ok(true)
 }

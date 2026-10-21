@@ -7,7 +7,9 @@ use tokio::time::sleep;
 use crate::agent::tool::{OfficeTool, ToolArtifact, ToolContext, ToolResult};
 
 use super::video_generate::{collect_video_audios, collect_video_refs, normalize_aspect_ratio};
-use crate::agent::tools::agnes_media::{get_json, http_client, post_json, resolve_video_route};
+use crate::agent::tools::agnes_media::{
+    get_json, http_client, post_json, resolve_video_routes, AgnesModelRoute,
+};
 
 pub struct VideoBatchGenerateTool;
 
@@ -174,16 +176,13 @@ impl OfficeTool for VideoBatchGenerateTool {
         );
 
         // ---- Agnes 凭证 ----
-        let media_route =
-            match resolve_video_route(&ctx.user_id, ctx.preferred_model.as_deref()).await {
-                Ok(route) => route,
+        let media_routes =
+            match resolve_video_routes(&ctx.user_id, ctx.preferred_model.as_deref()).await {
+                Ok(routes) => routes,
                 Err(err) => {
                     return ToolResult::err(format!("Agnes 凭证不可用：{err}"));
                 }
             };
-
-        let credentials = media_route.credentials;
-        let video_model = media_route.model;
         let client = match http_client(Duration::from_secs(90)) {
             Ok(c) => c,
             Err(err) => {
@@ -216,7 +215,10 @@ impl OfficeTool for VideoBatchGenerateTool {
 
             // Agnes V2.5: keyframe 模式传 mode="keyframes"，其他模式省略 mode
             let mut request_body = json!({
-                "model": video_model.as_str(),
+                "model": media_routes
+                    .first()
+                    .map(|route| route.model.as_str())
+                    .unwrap_or_default(),
                 "prompt": shot.prompt.clone(),
                 "seconds": shot.seconds.to_string(),
                 "size": size_label,
@@ -303,34 +305,54 @@ impl OfficeTool for VideoBatchGenerateTool {
             }
 
             // ---- 提交任务 ----
-            let create_url = credentials.endpoint("/v1/videos");
-            let create_resp: CreateVideoResponse =
-                match post_json(&client, &create_url, &credentials, &request_body).await {
-                    Ok(r) => r,
+            let mut selected_route: Option<AgnesModelRoute> = None;
+            let mut create_resp: Option<CreateVideoResponse> = None;
+            let mut create_errors = Vec::new();
+            for route in &media_routes {
+                request_body["model"] = json!(route.model.clone());
+                let create_url = route.credentials.endpoint("/v1/videos");
+                match post_json(&client, &create_url, &route.credentials, &request_body).await {
+                    Ok(response) => {
+                        selected_route = Some(route.clone());
+                        create_resp = Some(response);
+                        break;
+                    }
                     Err(err) => {
-                        // 单镜头失败不影响其他镜头
-                        ctx.send("state_update", json!({
+                        create_errors.push(format!("{}：{}", route.model, err));
+                    }
+                }
+            }
+
+            let selected_route = match selected_route {
+                Some(route) => route,
+                None => {
+                    // 单镜头失败不影响其他镜头
+                    ctx.send("state_update", json!({
                         "phase": "running",
                         "step": format!("镜头 {shot_num} 提交失败"),
-                        "detail": format!("镜头 {shot_num}《{}》提交失败：{err}，跳过", shot.title),
+                        "detail": format!("镜头 {shot_num}《{}》所有视频模型提交失败，跳过", shot.title),
                         "at": chrono::Utc::now().to_rfc3339(),
                     }));
-                        video_artifacts.push(ToolArtifact {
-                            kind: "video".into(),
-                            title: format!("镜头{}：{}（失败）", shot.index, shot.title),
-                            content: json!({
-                                "type": "generated_video",
-                                "title": format!("镜头{}：{}", shot.index, shot.title),
-                                "description": shot.description,
-                                "prompt": shot.prompt,
-                                "status": "failed",
-                                "error": format!("提交失败：{err}"),
-                                "shot_index": shot.index,
-                            }),
-                        });
-                        continue;
-                    }
-                };
+                    video_artifacts.push(ToolArtifact {
+                        kind: "video".into(),
+                        title: format!("镜头{}：{}（失败）", shot.index, shot.title),
+                        content: json!({
+                            "type": "generated_video",
+                            "title": format!("镜头{}：{}", shot.index, shot.title),
+                            "description": shot.description,
+                            "prompt": shot.prompt,
+                            "status": "failed",
+                            "error": format!("提交失败：{}", create_errors.join("；")),
+                            "shot_index": shot.index,
+                        }),
+                    });
+                    continue;
+                }
+            };
+            let credentials = selected_route.credentials;
+            let video_model = selected_route.model;
+            let create_resp =
+                create_resp.expect("selected_route 与 create_resp 应在同一候选成功时同时设置");
 
             let task_id = create_resp.id.clone();
             let poll_url =
@@ -402,6 +424,7 @@ impl OfficeTool for VideoBatchGenerateTool {
                         "shot_index": shot.index,
                         "transition": shot.transition,
                         "provider": "agnes",
+                        "model": video_model,
                         "api_version": "v2.5",
                     }),
                 });

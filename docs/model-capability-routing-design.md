@@ -1,8 +1,8 @@
 # 模型能力配置与自动路由设计
 
-> 状态：规划中
+> 状态：开发中（视频候选模型回退已实现，设置页路由预览待开发）
 > 
-> 适用分支：`feature/auth-recovery`
+> 适用分支：`feature/model-route-finalization`
 > 
 > 目标：在不破坏现有对话、图片和视频功能的前提下，让 WaKuOffice 按任务能力选择对应模型和协议。
 

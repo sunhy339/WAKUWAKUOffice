@@ -8,7 +8,7 @@ use crate::agent::tool::{OfficeTool, ToolArtifact, ToolContext, ToolResult};
 use crate::llm::LlmClient;
 use crate::models::{ChatAttachment, ChatMessage};
 
-use super::agnes_media::{get_json, http_client, post_json, resolve_video_route};
+use super::agnes_media::{get_json, http_client, post_json, resolve_video_routes, AgnesModelRoute};
 use super::local_video;
 
 pub struct VideoGenerateTool;
@@ -810,9 +810,9 @@ impl OfficeTool for VideoGenerateTool {
         let num_frames = (plan.seconds as u32) * frame_rate;
 
         // ---- Agnes 凭证 ----
-        let media_route =
-            match resolve_video_route(&ctx.user_id, ctx.preferred_model.as_deref()).await {
-                Ok(route) => route,
+        let media_routes =
+            match resolve_video_routes(&ctx.user_id, ctx.preferred_model.as_deref()).await {
+                Ok(routes) => routes,
                 Err(err) => {
                     return local_video_artifact(
                         ctx,
@@ -829,8 +829,6 @@ impl OfficeTool for VideoGenerateTool {
                     .await;
                 }
             };
-        let credentials = media_route.credentials;
-        let video_model = media_route.model;
         let client = match http_client(Duration::from_secs(90)) {
             Ok(client) => client,
             Err(err) => {
@@ -865,7 +863,10 @@ impl OfficeTool for VideoGenerateTool {
         // - text/reference 模式：mode 必须省略（传了会 400）
         // - keyframe 模式：mode 设为 "keyframes"（复数，API valid_modes 确认）
         let mut request_body = json!({
-            "model": video_model.as_str(),
+            "model": media_routes
+                .first()
+                .map(|route| route.model.as_str())
+                .unwrap_or_default(),
             "prompt": plan.prompt.clone(),
             "seconds": plan.seconds.to_string(),
             "size": size_label,
@@ -931,17 +932,45 @@ impl OfficeTool for VideoGenerateTool {
         }
 
         // ---- 提交创建任务 ----
-        let create_url = credentials.endpoint("/v1/videos");
-        let create_response = match post_json::<CreateVideoResponse>(
-            &client,
-            &create_url,
-            &credentials,
-            &request_body,
-        )
-        .await
-        {
-            Ok(response) => response,
-            Err(err) => {
+        // 创建任务失败时才切换候选模型；一旦上游接受任务，后续轮询必须固定
+        // 使用同一条路由，避免重复创建或把任务 ID 发到错误的模型服务。
+        let mut selected_route: Option<AgnesModelRoute> = None;
+        let mut create_response: Option<CreateVideoResponse> = None;
+        let mut create_errors = Vec::new();
+        for route in &media_routes {
+            request_body["model"] = json!(route.model.clone());
+            let create_url = route.credentials.endpoint("/v1/videos");
+            match post_json::<CreateVideoResponse>(
+                &client,
+                &create_url,
+                &route.credentials,
+                &request_body,
+            )
+            .await
+            {
+                Ok(response) => {
+                    selected_route = Some(route.clone());
+                    create_response = Some(response);
+                    break;
+                }
+                Err(err) => {
+                    create_errors.push(format!("{}：{}", route.model, err));
+                    ctx.send(
+                        "state_update",
+                        json!({
+                            "phase": "running",
+                            "step": "切换视频模型",
+                            "detail": format!("视频模型 {} 提交失败，正在尝试备用模型...", route.model),
+                            "at": chrono::Utc::now().to_rfc3339(),
+                        }),
+                    );
+                }
+            }
+        }
+
+        let media_route = match selected_route {
+            Some(route) => route,
+            None => {
                 return local_video_artifact(
                     ctx,
                     topic,
@@ -952,11 +981,22 @@ impl OfficeTool for VideoGenerateTool {
                     num_frames,
                     generation_mode,
                     image_inputs.len(),
-                    format!("Agnes V2.5 视频任务创建失败：{err}"),
+                    format!(
+                        "Agnes V2.5 视频任务创建失败：{}",
+                        if create_errors.is_empty() {
+                            "未配置可用的视频模型".to_string()
+                        } else {
+                            create_errors.join("；")
+                        }
+                    ),
                 )
                 .await;
             }
         };
+        let credentials = media_route.credentials;
+        let video_model = media_route.model;
+        let create_response =
+            create_response.expect("selected_route 与 create_response 应在同一候选成功时同时设置");
 
         // V2.5: 使用 id 作为查询标识
         let video_task_id = create_response.id.clone();

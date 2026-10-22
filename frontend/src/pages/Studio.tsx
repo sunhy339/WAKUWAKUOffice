@@ -1516,6 +1516,13 @@ export default function Studio() {
     setInputRefs((current) => current.filter((ref) => ref.id !== refId))
   }
 
+  const handleInsertArtifactsToInput = (items: { artifact: Artifact; sessionId?: string }[]) => {
+    if (isStreaming) return
+    items.forEach(({ artifact, sessionId: fromSessionId }) => {
+      handleInsertArtifactToInput(artifact, fromSessionId)
+    })
+  }
+
   const applyRealtimePptState = (payload: {
     project_id?: string
     title?: string
@@ -2650,6 +2657,7 @@ export default function Studio() {
                 onOpenArtifact={handleOpenArtifact}
                 onExportArtifact={handleExportArtifact}
                 onInsertArtifact={handleInsertArtifactToInput}
+                onInsertArtifacts={handleInsertArtifactsToInput}
                 messagesEndRef={messagesEndRef}
               />
             )}

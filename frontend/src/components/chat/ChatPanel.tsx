@@ -47,6 +47,7 @@ interface ChatPanelProps {
   onOpenArtifact: (artifactId: string) => void
   onExportArtifact: (artifact: Artifact) => void
   onInsertArtifact: (artifact: Artifact, sessionId?: string) => void
+  onInsertArtifacts?: (items: { artifact: Artifact; sessionId?: string }[]) => void
   /** 历史会话产物列表（用于 @ 引用历史产物） */
   historyArtifacts?: { artifact: Artifact; sessionTitle: string; sessionId: string }[]
   messagesEndRef: React.RefObject<HTMLDivElement>
@@ -204,6 +205,7 @@ function InputRefChip({ refItem, onRemove }: { refItem: InputRef; onRemove?: (id
     <div className={`group inline-flex max-w-full items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[11px] font-medium ring-1 ${colorClass}`}>
       <Icon className="h-3.5 w-3.5 shrink-0" />
       <span className="max-w-[160px] truncate">{refItem.title}</span>
+      {refItem.sessionId && <span className="shrink-0 text-[10px] opacity-60">历史</span>}
       {onRemove && (
         <button
           type="button"
@@ -354,6 +356,7 @@ export function ChatPanel({
   onOpenArtifact,
   onExportArtifact,
   onInsertArtifact,
+  onInsertArtifacts,
   messagesEndRef,
 }: ChatPanelProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -999,6 +1002,11 @@ export function ChatPanel({
                   artifacts={artifactPickerScope}
                   historyArtifacts={historyArtifacts}
                   onSelect={handleFilePickerSelect}
+                  onSelectMany={onInsertArtifacts ? (items) => {
+                    onInsertArtifacts(items)
+                    setShowFilePicker(false)
+                    window.setTimeout(() => textareaRef.current?.focus(), 50)
+                  } : undefined}
                   onClose={() => setShowFilePicker(false)}
                 />
               )}

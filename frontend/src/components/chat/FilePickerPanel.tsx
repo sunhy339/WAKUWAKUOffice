@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useMemo, useCallback } from 'react'
-import { FileEdit, Sheet, PenTool, Image as ImageIcon, Clapperboard, FileText, Search, Clock, MessageSquare } from 'lucide-react'
+import { Check, FileEdit, Sheet, PenTool, Image as ImageIcon, Clapperboard, FileText, Search, Clock, MessageSquare, ListPlus } from 'lucide-react'
 import type { Artifact } from '@/types'
 
 export interface FilePickerProps {
@@ -9,6 +9,7 @@ export interface FilePickerProps {
   historyArtifacts?: HistoryArtifactItem[]
   /** 选择回调 */
   onSelect: (artifact: Artifact, sessionId?: string) => void
+  onSelectMany?: (items: { artifact: Artifact; sessionId?: string }[]) => void
   onClose: () => void
 }
 
@@ -48,10 +49,12 @@ const KIND_LABEL: Record<string, string> = {
 
 type PickerTab = 'current' | 'history'
 
-export function FilePickerPanel({ artifacts, historyArtifacts, onSelect, onClose }: FilePickerProps) {
+export function FilePickerPanel({ artifacts, historyArtifacts, onSelect, onSelectMany, onClose }: FilePickerProps) {
   const [query, setQuery] = useState('')
   const [selectedIndex, setSelectedIndex] = useState(0)
   const [activeTab, setActiveTab] = useState<PickerTab>('current')
+  const [multiSelect, setMultiSelect] = useState(false)
+  const [selectedKeys, setSelectedKeys] = useState<string[]>([])
   const inputRef = useRef<HTMLInputElement>(null)
   const listRef = useRef<HTMLDivElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
@@ -103,18 +106,18 @@ export function FilePickerPanel({ artifacts, historyArtifacts, onSelect, onClose
   // 扁平化列表用于键盘导航
   const flatList = useMemo(() => {
     if (activeTab === 'current') {
-      const arr: { artifact: Artifact; sessionId?: string }[] = []
+      const arr: { artifact: Artifact; sessionId?: string; key: string }[] = []
       for (const kind of Object.keys(currentGrouped).sort()) {
         for (const a of currentGrouped[kind]) {
-          arr.push({ artifact: a })
+          arr.push({ artifact: a, key: `current:${a.id}` })
         }
       }
       return arr
     } else {
-      const arr: { artifact: Artifact; sessionId?: string }[] = []
+      const arr: { artifact: Artifact; sessionId?: string; key: string }[] = []
       for (const sessionTitle of Object.keys(historyGrouped).sort()) {
         for (const item of historyGrouped[sessionTitle]) {
-          arr.push({ artifact: item.artifact, sessionId: item.sessionId })
+          arr.push({ artifact: item.artifact, sessionId: item.sessionId, key: `history:${item.sessionId}:${item.artifact.id}` })
         }
       }
       return arr
@@ -152,7 +155,13 @@ export function FilePickerPanel({ artifacts, historyArtifacts, onSelect, onClose
       } else if (e.key === 'Enter') {
         e.preventDefault()
         const item = flatList[selectedIndex]
-        if (item) onSelect(item.artifact, item.sessionId)
+        if (item) {
+          if (multiSelect && onSelectMany) {
+            setSelectedKeys((current) => current.includes(item.key) ? current.filter((key) => key !== item.key) : [...current, item.key])
+          } else {
+            onSelect(item.artifact, item.sessionId)
+          }
+        }
       } else if (e.key === 'Tab') {
         e.preventDefault()
         if (activeTab === 'current' && historyList.length > 0) {
@@ -164,11 +173,19 @@ export function FilePickerPanel({ artifacts, historyArtifacts, onSelect, onClose
     }
     document.addEventListener('keydown', handleKeyDown)
     return () => document.removeEventListener('keydown', handleKeyDown)
-  }, [flatList, selectedIndex, activeTab, historyList.length, currentList.length, onClose, onSelect])
+  }, [flatList, selectedIndex, activeTab, historyList.length, currentList.length, multiSelect, onClose, onSelect, onSelectMany])
 
   useEffect(() => {
     setSelectedIndex(0)
   }, [query, activeTab])
+
+  useEffect(() => {
+    const visibleKeys = new Set(flatList.map((item) => item.key))
+    setSelectedKeys((current) => {
+      const next = current.filter((key) => visibleKeys.has(key))
+      return next.length === current.length ? current : next
+    })
+  }, [flatList])
 
   // 滚动到选中项
   useEffect(() => {
@@ -176,9 +193,20 @@ export function FilePickerPanel({ artifacts, historyArtifacts, onSelect, onClose
     el?.scrollIntoView({ block: 'nearest' })
   }, [selectedIndex])
 
-  const handleItemClick = useCallback((artifact: Artifact, sessionId?: string) => {
-    onSelect(artifact, sessionId)
-  }, [onSelect])
+  const handleItemClick = useCallback((item: { artifact: Artifact; sessionId?: string; key: string }) => {
+    if (multiSelect && onSelectMany) {
+      setSelectedKeys((current) => current.includes(item.key) ? current.filter((key) => key !== item.key) : [...current, item.key])
+      return
+    }
+    onSelect(item.artifact, item.sessionId)
+  }, [multiSelect, onSelect, onSelectMany])
+
+  const selectedItems = useMemo(() => flatList.filter((item) => selectedKeys.includes(item.key)), [flatList, selectedKeys])
+
+  const handleSelectMany = useCallback(() => {
+    if (!onSelectMany || selectedItems.length === 0) return
+    onSelectMany(selectedItems.map(({ artifact, sessionId }) => ({ artifact, sessionId })))
+  }, [onSelectMany, selectedItems])
 
   const hasCurrent = currentList.length > 0
   const hasHistory = historyList.length > 0
@@ -219,6 +247,26 @@ export function FilePickerPanel({ artifacts, historyArtifacts, onSelect, onClose
             ESC 关闭
           </span>
         </div>
+        {onSelectMany && (
+          <div className="mt-2 flex items-center justify-between gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                setMultiSelect((current) => !current)
+                setSelectedKeys([])
+              }}
+              className={`inline-flex items-center gap-1 rounded-md px-2 py-1 text-[10px] font-medium transition ${
+                multiSelect ? 'bg-primary-50 text-primary-700' : 'text-surface-400 hover:bg-surface-50'
+              }`}
+            >
+              <ListPlus className="h-3 w-3" />
+              {multiSelect ? '多选中' : '多选引用'}
+            </button>
+            {multiSelect && selectedItems.length > 0 && (
+              <span className="text-[10px] text-surface-400">已选 {selectedItems.length} 项</span>
+            )}
+          </div>
+        )}
         {/* Tab 切换 */}
         {(hasCurrent && hasHistory) && (
           <div className="mt-2 flex gap-1">
@@ -265,12 +313,19 @@ export function FilePickerPanel({ artifacts, historyArtifacts, onSelect, onClose
                     key={artifact.id}
                     data-idx={idx}
                     onMouseEnter={() => setSelectedIndex(idx)}
-                    onClick={() => handleItemClick(artifact)}
+                    onClick={() => handleItemClick({ artifact, key: `current:${artifact.id}` })}
                     className={`flex cursor-pointer items-center gap-2.5 px-3 py-2 text-xs transition-colors ${
                       isSelected ? 'bg-primary-50 text-primary-700' : 'text-surface-700 hover:bg-surface-50'
                     }`}
                   >
                     <Icon className={`h-3.5 w-3.5 shrink-0 ${isSelected ? 'text-primary-500' : 'text-surface-400'}`} />
+                    {multiSelect && onSelectMany && (
+                      <span className={`inline-flex h-4 w-4 shrink-0 items-center justify-center rounded border ${
+                        selectedKeys.includes(`current:${artifact.id}`) ? 'border-primary-500 bg-primary-500 text-white' : 'border-surface-200 bg-white'
+                      }`}>
+                        {selectedKeys.includes(`current:${artifact.id}`) && <Check className="h-3 w-3" />}
+                      </span>
+                    )}
                     <span className="truncate font-medium">{artifact.title || '未命名'}</span>
                     <span className="ml-auto shrink-0 text-[10px] text-surface-300">
                       {KIND_LABEL[kind]}
@@ -298,12 +353,19 @@ export function FilePickerPanel({ artifacts, historyArtifacts, onSelect, onClose
                     key={item.artifact.id}
                     data-idx={idx}
                     onMouseEnter={() => setSelectedIndex(idx)}
-                    onClick={() => handleItemClick(item.artifact, item.sessionId)}
+                    onClick={() => handleItemClick({ artifact: item.artifact, sessionId: item.sessionId, key: `history:${item.sessionId}:${item.artifact.id}` })}
                     className={`flex cursor-pointer items-center gap-2.5 px-3 py-2 text-xs transition-colors ${
                       isSelected ? 'bg-primary-50 text-primary-700' : 'text-surface-700 hover:bg-surface-50'
                     }`}
                   >
                     <Icon className={`h-3.5 w-3.5 shrink-0 ${isSelected ? 'text-primary-500' : 'text-surface-400'}`} />
+                    {multiSelect && onSelectMany && (
+                      <span className={`inline-flex h-4 w-4 shrink-0 items-center justify-center rounded border ${
+                        selectedKeys.includes(`history:${item.sessionId}:${item.artifact.id}`) ? 'border-primary-500 bg-primary-500 text-white' : 'border-surface-200 bg-white'
+                      }`}>
+                        {selectedKeys.includes(`history:${item.sessionId}:${item.artifact.id}`) && <Check className="h-3 w-3" />}
+                      </span>
+                    )}
                     <span className="truncate font-medium">{item.artifact.title || '未命名'}</span>
                     <span className="ml-auto shrink-0 text-[10px] text-surface-300">
                       {KIND_LABEL[kind]}
@@ -317,8 +379,18 @@ export function FilePickerPanel({ artifacts, historyArtifacts, onSelect, onClose
       </div>
 
       {/* 底部提示 */}
-      <div className="border-t border-surface-100 px-3 py-1.5 text-[10px] text-surface-300">
-        <kbd className="font-sans">↑↓</kbd> 选择 · <kbd className="font-sans">Enter</kbd> 引入 · <kbd className="font-sans">Tab</kbd> 切换 · <kbd className="font-sans">ESC</kbd> 关闭
+      <div className="flex items-center justify-between gap-2 border-t border-surface-100 px-3 py-1.5 text-[10px] text-surface-300">
+        <span><kbd className="font-sans">↑↓</kbd> 选择 · <kbd className="font-sans">Enter</kbd> 引入 · <kbd className="font-sans">Tab</kbd> 切换 · <kbd className="font-sans">ESC</kbd> 关闭</span>
+        {multiSelect && onSelectMany && (
+          <button
+            type="button"
+            disabled={selectedItems.length === 0}
+            onClick={handleSelectMany}
+            className="shrink-0 rounded-md bg-surface-900 px-2.5 py-1 text-[10px] font-medium text-white transition hover:bg-surface-700 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            引用已选（{selectedItems.length}）
+          </button>
+        )}
       </div>
     </div>
   )

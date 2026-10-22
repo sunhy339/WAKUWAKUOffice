@@ -3,6 +3,9 @@ FROM node:20-slim AS frontend
 WORKDIR /fe
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm config set registry https://registry.npmmirror.com && npm ci
+# 依赖安装层保持缓存，源码层由构建标识控制失效。
+ARG FRONTEND_SOURCE_REV=dev
+RUN echo "frontend-source-rev=${FRONTEND_SOURCE_REV}"
 COPY frontend/ .
 RUN npm run build
 
@@ -22,7 +25,9 @@ RUN mkdir -p /usr/local/cargo && \
 # 先复制 Cargo.toml 利用 docker 缓存
 COPY server/Cargo.toml server/Cargo.lock* ./
 RUN mkdir src && echo 'fn main() {}' > src/main.rs && cargo build --release 2>/dev/null || true
-# 复制源码
+# 复制源码。通过构建标识让源码变更准确失效，而不影响依赖缓存。
+ARG SERVER_SOURCE_REV=dev
+RUN echo "server-source-rev=${SERVER_SOURCE_REV}"
 COPY server/src ./src
 COPY migrations ../migrations
 # 复制前端构建产物（rust-embed 在编译时读取）

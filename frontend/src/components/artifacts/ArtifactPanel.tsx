@@ -991,7 +991,10 @@ export function ArtifactPanel({
   const canExportActiveArtifact = activeArtifact?.kind === 'document' || activeArtifact?.kind === 'markdown' || activeArtifact?.kind === 'sheet' || activeArtifact?.kind === 'drawio'
   const canEditCurrentSlide = effectiveTool === 'ppt' && slides.length > 0 && !!slides[currentSlideIndex]
   const currentSlide = slides[currentSlideIndex]
-  const canManageVersions = Boolean(activeArtifact && onListArtifactVersions && onRestoreArtifactVersion)
+  // 旧会话中的 Mermaid 兼容预览只存在于消息恢复结果里，没有对应的持久化
+  // session_artifacts 记录，不能伪造版本或提供会失败的恢复入口。
+  const isTransientArtifact = activeArtifact?.id.startsWith('legacy-') || false
+  const canManageVersions = Boolean(activeArtifact && !isTransientArtifact && onListArtifactVersions && onRestoreArtifactVersion)
 
   const handleToggleVersions = async () => {
     if (!activeArtifact || !onListArtifactVersions) return

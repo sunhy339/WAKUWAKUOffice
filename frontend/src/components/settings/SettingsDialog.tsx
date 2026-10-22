@@ -34,6 +34,16 @@ const capabilityOptions: Array<{ value: ModelCapability; label: string }> = [
   { value: 'video_generation', label: '视频' },
 ]
 
+const conversationCapabilities: ModelCapability[] = ['text', 'tool_calling', 'vision']
+const mediaCapabilities: ModelCapability[] = ['image_generation', 'image_edit', 'video_generation']
+
+function modelStatusForCapabilities(config: LLMModelConfig, statuses: LLMModelConfig['capability_statuses']): LLMModelConfig['status'] {
+  const current = config.capabilities.map((capability) => statuses?.[capability])
+  if (current.length > 0 && current.every((status) => status === 'unavailable')) return 'unavailable'
+  if (current.some((status) => status === 'available')) return 'available'
+  return 'unknown'
+}
+
 const routePreviewOptions: Array<{ capability: ModelCapability; label: string; description: string; Icon: typeof MessageSquare }> = [
   { capability: 'text', label: '普通对话', description: '文本回答与日常交流', Icon: MessageSquare },
   { capability: 'vision', label: '识图分析', description: '图片理解、OCR 与截图分析', Icon: ScanSearch },
@@ -95,7 +105,11 @@ export function SettingsDialog({ open, settings, onClose, onSave }: SettingsDial
   const [testingLlmId, setTestingLlmId] = useState<string | null>(null)
   const [llmTestResults, setLlmTestResults] = useState<Record<string, { ok: boolean; message: string }>>({})
   const [testingCapabilityKey, setTestingCapabilityKey] = useState<string | null>(null)
-  const [capabilityTestResults, setCapabilityTestResults] = useState<Record<string, { ok: boolean; message: string }>>({})
+  const [capabilityTestResults, setCapabilityTestResults] = useState<Record<string, {
+    ok: boolean
+    message: string
+    results?: Array<{ capability: string; ok: boolean; message: string }>
+  }>>({})
   const [visibleApiKeyProfiles, setVisibleApiKeyProfiles] = useState<Record<string, boolean>>({})
   const [testingMcpId, setTestingMcpId] = useState<string | null>(null)
   const [mcpTestResults, setMcpTestResults] = useState<Record<string, { ok: boolean; message: string; tools: string[] }>>({})
@@ -254,19 +268,22 @@ export function SettingsDialog({ open, settings, onClose, onSave }: SettingsDial
     }
   }
 
-  const testModelCapabilities = async (profile: LLMProfile, config: LLMModelConfig) => {
-    const testKey = `${profile.id}:${config.model}`
-    if (config.capabilities.length === 0) {
+  const testModelCapabilities = async (profile: LLMProfile, config: LLMModelConfig, scope: 'conversation' | 'media') => {
+    const requestedCapabilities = config.capabilities.filter((capability) => (
+      scope === 'conversation' ? conversationCapabilities : mediaCapabilities
+    ).includes(capability))
+    const testKey = `${profile.id}:${config.model}:${scope}`
+    if (requestedCapabilities.length === 0) {
       setCapabilityTestResults((prev) => ({
         ...prev,
-        [testKey]: { ok: false, message: '请先勾选至少一项能力' },
+        [testKey]: { ok: false, message: scope === 'conversation' ? '请先勾选文本、工具或视觉能力' : '请先勾选文生图、图生图或视频能力' },
       }))
       return
     }
     setTestingCapabilityKey(testKey)
     setCapabilityTestResults((prev) => ({
       ...prev,
-      [testKey]: { ok: false, message: '正在测试所选能力；媒体能力可能产生上游调用费用...' },
+      [testKey]: { ok: false, message: scope === 'media' ? '正在测试媒体能力；本次会调用真实生成接口...' : '正在测试对话能力；发送最小请求...' },
     }))
     try {
       const res = await settingsApi.testModelCapabilities({
@@ -275,7 +292,7 @@ export function SettingsDialog({ open, settings, onClose, onSave }: SettingsDial
         model: config.model,
         wire_api: profile.wire_api,
         reasoning_effort: profile.reasoning_effort,
-        capabilities: config.capabilities,
+        capabilities: requestedCapabilities,
       })
       const results = Array.isArray(res.data?.results) ? res.data.results : []
       const failed = results.filter((item) => !item.ok)
@@ -287,20 +304,26 @@ export function SettingsDialog({ open, settings, onClose, onSave }: SettingsDial
         ? `测试通过：${results.length} 项能力可用`
         : `测试完成：${failed.length} 项失败；${failed.map((item) => item.message).join('；')}`
       updateModelConfig(profile, config.model, {
-        status: results.some((item) => item.ok) ? 'available' : 'unavailable',
+        status: modelStatusForCapabilities(config, capabilityStatuses),
         capability_statuses: capabilityStatuses,
         last_checked_at: new Date().toISOString(),
         last_error: failed.length > 0 ? failed.map((item) => item.message).join('；') : undefined,
       })
       setCapabilityTestResults((prev) => ({
         ...prev,
-        [testKey]: { ok: failed.length === 0 && results.length > 0, message: summary },
+        [testKey]: { ok: failed.length === 0 && results.length > 0, message: summary, results },
       }))
     } catch (err: any) {
       const message = err.response?.data?.detail || err.message || '能力测试失败'
       updateModelConfig(profile, config.model, {
-        status: 'unavailable',
-        capability_statuses: Object.fromEntries(config.capabilities.map((capability) => [capability, 'unavailable'])) as LLMModelConfig['capability_statuses'],
+        status: modelStatusForCapabilities(config, {
+          ...(config.capability_statuses || {}),
+          ...Object.fromEntries(requestedCapabilities.map((capability) => [capability, 'unavailable'])),
+        } as LLMModelConfig['capability_statuses']),
+        capability_statuses: {
+          ...(config.capability_statuses || {}),
+          ...Object.fromEntries(requestedCapabilities.map((capability) => [capability, 'unavailable'])),
+        } as LLMModelConfig['capability_statuses'],
         last_checked_at: new Date().toISOString(),
         last_error: message,
       })
@@ -684,22 +707,57 @@ export function SettingsDialog({ open, settings, onClose, onSave }: SettingsDial
                                   <span className={`rounded-full px-2 py-1 text-[10px] font-semibold ${config.status === 'available' ? 'bg-emerald-50 text-emerald-700' : config.status === 'unavailable' ? 'bg-red-50 text-red-700' : 'bg-amber-50 text-amber-700'}`}>
                                     {config.status === 'available' ? '可用' : config.status === 'unavailable' ? '不可用' : '待确认'}
                                   </span>
-                                  <button
-                                    type="button"
-                                    onClick={() => void testModelCapabilities(profile, config)}
-                                    disabled={testingCapabilityKey === `${profile.id}:${config.model}`}
-                                    className="inline-flex items-center gap-1 rounded-full border border-violet-200 bg-violet-50 px-2 py-1 text-[10px] font-semibold text-violet-700 hover:bg-violet-100 disabled:cursor-not-allowed disabled:opacity-50"
-                                    title={config.capabilities.some((item) => ['image_generation', 'image_edit', 'video_generation'].includes(item)) ? '媒体能力测试会调用生成接口，可能产生费用' : '发送最小请求测试所选能力'}
-                                  >
-                                    <FlaskConical className={`h-3 w-3 ${testingCapabilityKey === `${profile.id}:${config.model}` ? 'animate-pulse' : ''}`} />
-                                    {testingCapabilityKey === `${profile.id}:${config.model}` ? '测试中' : '测试能力'}
-                                  </button>
+                                  {conversationCapabilities.some((capability) => config.capabilities.includes(capability)) && (
+                                    <button
+                                      type="button"
+                                      onClick={() => void testModelCapabilities(profile, config, 'conversation')}
+                                      disabled={testingCapabilityKey === `${profile.id}:${config.model}:conversation`}
+                                      className="inline-flex items-center gap-1 rounded-full border border-violet-200 bg-violet-50 px-2 py-1 text-[10px] font-semibold text-violet-700 hover:bg-violet-100 disabled:cursor-not-allowed disabled:opacity-50"
+                                      title="发送最小文本/工具/视觉请求，不调用媒体生成"
+                                    >
+                                      <FlaskConical className={`h-3 w-3 ${testingCapabilityKey === `${profile.id}:${config.model}:conversation` ? 'animate-pulse' : ''}`} />
+                                      {testingCapabilityKey === `${profile.id}:${config.model}:conversation` ? '测试中' : '测试对话能力'}
+                                    </button>
+                                  )}
+                                  {mediaCapabilities.some((capability) => config.capabilities.includes(capability)) && (
+                                    <button
+                                      type="button"
+                                      onClick={() => void testModelCapabilities(profile, config, 'media')}
+                                      disabled={testingCapabilityKey === `${profile.id}:${config.model}:media`}
+                                      className="inline-flex items-center gap-1 rounded-full border border-orange-200 bg-orange-50 px-2 py-1 text-[10px] font-semibold text-orange-700 hover:bg-orange-100 disabled:cursor-not-allowed disabled:opacity-50"
+                                      title="调用真实图片/视频生成接口，可能产生上游费用"
+                                    >
+                                      <FlaskConical className={`h-3 w-3 ${testingCapabilityKey === `${profile.id}:${config.model}:media` ? 'animate-pulse' : ''}`} />
+                                      {testingCapabilityKey === `${profile.id}:${config.model}:media` ? '测试中' : '测试媒体能力'}
+                                    </button>
+                                  )}
                                 </div>
-                                {capabilityTestResults[`${profile.id}:${config.model}`] && (
-                                  <div className={`mt-2 rounded-lg px-2 py-1.5 text-[10px] leading-4 ${capabilityTestResults[`${profile.id}:${config.model}`].ok ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-600'}`}>
-                                    {capabilityTestResults[`${profile.id}:${config.model}`].message}
+                                {capabilityOptions.some((capability) => config.capability_statuses?.[capability.value]) && (
+                                  <div className="mt-2 flex flex-wrap gap-1">
+                                    {capabilityOptions.filter((capability) => config.capabilities.includes(capability.value) && config.capability_statuses?.[capability.value]).map((capability) => {
+                                      const status = config.capability_statuses?.[capability.value]
+                                      return (
+                                        <span key={`${config.model}-${capability.value}-status`} className={`rounded-full px-2 py-0.5 text-[9px] font-semibold ${status === 'available' ? 'bg-emerald-50 text-emerald-700' : status === 'unavailable' ? 'bg-red-50 text-red-700' : 'bg-amber-50 text-amber-700'}`}>
+                                          {capability.label}：{status === 'available' ? '可用' : status === 'unavailable' ? '不可用' : '待确认'}
+                                        </span>
+                                      )
+                                    })}
                                   </div>
                                 )}
+                                {(['conversation', 'media'] as const).map((scope) => {
+                                  const result = capabilityTestResults[`${profile.id}:${config.model}:${scope}`]
+                                  if (!result) return null
+                                  return (
+                                    <div key={`${config.model}-${scope}-result`} className={`mt-2 rounded-lg px-2 py-1.5 text-[10px] leading-4 ${result.ok ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-600'}`}>
+                                      <div>{result.message}</div>
+                                      {result.results && result.results.length > 1 && (
+                                        <div className="mt-1 space-y-0.5 text-[9px] opacity-90">
+                                          {result.results.map((item) => <div key={`${item.capability}-${item.message}`}>{capabilityOptions.find((option) => option.value === item.capability)?.label || item.capability}：{item.ok ? '通过' : item.message}</div>)}
+                                        </div>
+                                      )}
+                                    </div>
+                                  )
+                                })}
                               </div>
                             ))}
                             {getModelConfigs(profile).length === 0 && (

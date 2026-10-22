@@ -90,6 +90,12 @@ pub fn select_models(
     let eligible = |config: &LlmModelConfig| {
         config.enabled
             && config.status != ModelAvailability::Unavailable
+            && config
+                .capability_statuses
+                .get(&capability)
+                .copied()
+                .unwrap_or(config.status)
+                != ModelAvailability::Unavailable
             && config.capabilities.contains(&capability)
             && !is_media_model_for_text(config.model.as_str(), requirement)
     };
@@ -159,6 +165,7 @@ pub fn legacy_model_config(model: &str) -> LlmModelConfig {
         enabled: true,
         priority: 0,
         status: ModelAvailability::Unknown,
+        capability_statuses: std::collections::HashMap::new(),
         last_checked_at: None,
         last_error: None,
     }
@@ -223,6 +230,7 @@ mod tests {
             enabled: true,
             priority,
             status: ModelAvailability::Unknown,
+            capability_statuses: std::collections::HashMap::new(),
             last_checked_at: None,
             last_error: None,
         }
@@ -302,6 +310,28 @@ mod tests {
                 .model,
             "backup"
         );
+    }
+
+    #[test]
+    fn capability_unavailability_only_skips_that_capability() {
+        let mut partially_available = model(
+            "mixed-model",
+            vec![ModelCapability::Text, ModelCapability::ImageGeneration],
+            0,
+        );
+        partially_available.capability_statuses.insert(
+            ModelCapability::ImageGeneration,
+            ModelAvailability::Unavailable,
+        );
+        let profile = profile(vec![partially_available]);
+
+        assert_eq!(
+            select_model(&profile, None, ModelRequirement::Text)
+                .unwrap()
+                .model,
+            "mixed-model"
+        );
+        assert!(select_model(&profile, None, ModelRequirement::ImageGeneration).is_none());
     }
 
     #[test]

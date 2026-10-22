@@ -48,6 +48,7 @@ export function routeModelsForCapability(
   const configs = effectiveModelConfigs(profile)
   const eligible = (config: LLMModelConfig) => config.enabled
     && config.status !== 'unavailable'
+    && config.capability_statuses?.[capability] !== 'unavailable'
     && config.capabilities.includes(capability)
     && !isMediaModelForChat(config.model, capability)
   const selected: string[] = []

@@ -1,4 +1,4 @@
-import { Check, Cpu, Eye, EyeOff, Image, KeyRound, Layers3, MessageSquare, Plus, RefreshCw, ScanSearch, SlidersHorizontal, Trash2, Video, X } from 'lucide-react'
+import { Check, Cpu, Eye, EyeOff, FlaskConical, Image, KeyRound, Layers3, MessageSquare, Plus, RefreshCw, ScanSearch, SlidersHorizontal, Trash2, Video, X } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { settingsApi } from '@/api'
 import type { AppSettings, LLMModelConfig, LLMProfile, MCPServiceConfig, ModelCapability } from '@/types'
@@ -61,6 +61,7 @@ function getModelConfigs(profile: LLMProfile): LLMModelConfig[] {
     enabled: true,
     priority: 0,
     status: 'unknown',
+    capability_statuses: {},
   }))
 }
 
@@ -93,6 +94,8 @@ export function SettingsDialog({ open, settings, onClose, onSave }: SettingsDial
   const [modelFetchResults, setModelFetchResults] = useState<Record<string, { ok: boolean; message: string }>>({})
   const [testingLlmId, setTestingLlmId] = useState<string | null>(null)
   const [llmTestResults, setLlmTestResults] = useState<Record<string, { ok: boolean; message: string }>>({})
+  const [testingCapabilityKey, setTestingCapabilityKey] = useState<string | null>(null)
+  const [capabilityTestResults, setCapabilityTestResults] = useState<Record<string, { ok: boolean; message: string }>>({})
   const [visibleApiKeyProfiles, setVisibleApiKeyProfiles] = useState<Record<string, boolean>>({})
   const [testingMcpId, setTestingMcpId] = useState<string | null>(null)
   const [mcpTestResults, setMcpTestResults] = useState<Record<string, { ok: boolean; message: string; tools: string[] }>>({})
@@ -124,6 +127,7 @@ export function SettingsDialog({ open, settings, onClose, onSave }: SettingsDial
         enabled: true,
         priority: 0,
         status: 'unknown',
+        capability_statuses: {},
       }))
       if (!next.models.includes(next.default_model)) {
         next.default_model = next.models[0] || ''
@@ -188,7 +192,9 @@ export function SettingsDialog({ open, settings, onClose, onSave }: SettingsDial
     const capabilities = config.capabilities.includes(capability)
       ? config.capabilities.filter((item) => item !== capability)
       : [...config.capabilities, capability]
-    updateModelConfig(profile, model, { capabilities })
+    const capabilityStatuses = { ...(config.capability_statuses || {}) }
+    delete capabilityStatuses[capability]
+    updateModelConfig(profile, model, { capabilities, capability_statuses: capabilityStatuses })
   }
 
   const fetchModels = async (profile: LLMProfile) => {
@@ -245,6 +251,65 @@ export function SettingsDialog({ open, settings, onClose, onSave }: SettingsDial
       }))
     } finally {
       setTestingLlmId(null)
+    }
+  }
+
+  const testModelCapabilities = async (profile: LLMProfile, config: LLMModelConfig) => {
+    const testKey = `${profile.id}:${config.model}`
+    if (config.capabilities.length === 0) {
+      setCapabilityTestResults((prev) => ({
+        ...prev,
+        [testKey]: { ok: false, message: '请先勾选至少一项能力' },
+      }))
+      return
+    }
+    setTestingCapabilityKey(testKey)
+    setCapabilityTestResults((prev) => ({
+      ...prev,
+      [testKey]: { ok: false, message: '正在测试所选能力；媒体能力可能产生上游调用费用...' },
+    }))
+    try {
+      const res = await settingsApi.testModelCapabilities({
+        base_url: profile.base_url,
+        api_keys: getProfileKeys(profile),
+        model: config.model,
+        wire_api: profile.wire_api,
+        reasoning_effort: profile.reasoning_effort,
+        capabilities: config.capabilities,
+      })
+      const results = Array.isArray(res.data?.results) ? res.data.results : []
+      const failed = results.filter((item) => !item.ok)
+      const capabilityStatuses = { ...(config.capability_statuses || {}) }
+      results.forEach((item) => {
+        capabilityStatuses[item.capability as ModelCapability] = item.ok ? 'available' : 'unavailable'
+      })
+      const summary = failed.length === 0
+        ? `测试通过：${results.length} 项能力可用`
+        : `测试完成：${failed.length} 项失败；${failed.map((item) => item.message).join('；')}`
+      updateModelConfig(profile, config.model, {
+        status: results.some((item) => item.ok) ? 'available' : 'unavailable',
+        capability_statuses: capabilityStatuses,
+        last_checked_at: new Date().toISOString(),
+        last_error: failed.length > 0 ? failed.map((item) => item.message).join('；') : undefined,
+      })
+      setCapabilityTestResults((prev) => ({
+        ...prev,
+        [testKey]: { ok: failed.length === 0 && results.length > 0, message: summary },
+      }))
+    } catch (err: any) {
+      const message = err.response?.data?.detail || err.message || '能力测试失败'
+      updateModelConfig(profile, config.model, {
+        status: 'unavailable',
+        capability_statuses: Object.fromEntries(config.capabilities.map((capability) => [capability, 'unavailable'])) as LLMModelConfig['capability_statuses'],
+        last_checked_at: new Date().toISOString(),
+        last_error: message,
+      })
+      setCapabilityTestResults((prev) => ({
+        ...prev,
+        [testKey]: { ok: false, message },
+      }))
+    } finally {
+      setTestingCapabilityKey(null)
     }
   }
 
@@ -574,6 +639,9 @@ export function SettingsDialog({ open, settings, onClose, onSave }: SettingsDial
                             </div>
                             <span className="rounded-full bg-white px-2 py-1 text-[10px] font-semibold text-surface-400">未测试模型显示为待确认</span>
                           </div>
+                          <div className="mb-2 rounded-xl border border-amber-200/70 bg-amber-50/80 px-2.5 py-2 text-[10px] leading-4 text-amber-700">
+                            文本、视觉测试只发送最小请求；文生图、图生图和视频测试会调用真实媒体接口，可能产生上游费用。
+                          </div>
                           <div className="space-y-2">
                             {getModelConfigs(profile).map((config) => (
                               <div key={config.model} className="rounded-xl border border-black/[0.06] bg-white/80 p-2.5">
@@ -616,7 +684,22 @@ export function SettingsDialog({ open, settings, onClose, onSave }: SettingsDial
                                   <span className={`rounded-full px-2 py-1 text-[10px] font-semibold ${config.status === 'available' ? 'bg-emerald-50 text-emerald-700' : config.status === 'unavailable' ? 'bg-red-50 text-red-700' : 'bg-amber-50 text-amber-700'}`}>
                                     {config.status === 'available' ? '可用' : config.status === 'unavailable' ? '不可用' : '待确认'}
                                   </span>
+                                  <button
+                                    type="button"
+                                    onClick={() => void testModelCapabilities(profile, config)}
+                                    disabled={testingCapabilityKey === `${profile.id}:${config.model}`}
+                                    className="inline-flex items-center gap-1 rounded-full border border-violet-200 bg-violet-50 px-2 py-1 text-[10px] font-semibold text-violet-700 hover:bg-violet-100 disabled:cursor-not-allowed disabled:opacity-50"
+                                    title={config.capabilities.some((item) => ['image_generation', 'image_edit', 'video_generation'].includes(item)) ? '媒体能力测试会调用生成接口，可能产生费用' : '发送最小请求测试所选能力'}
+                                  >
+                                    <FlaskConical className={`h-3 w-3 ${testingCapabilityKey === `${profile.id}:${config.model}` ? 'animate-pulse' : ''}`} />
+                                    {testingCapabilityKey === `${profile.id}:${config.model}` ? '测试中' : '测试能力'}
+                                  </button>
                                 </div>
+                                {capabilityTestResults[`${profile.id}:${config.model}`] && (
+                                  <div className={`mt-2 rounded-lg px-2 py-1.5 text-[10px] leading-4 ${capabilityTestResults[`${profile.id}:${config.model}`].ok ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-600'}`}>
+                                    {capabilityTestResults[`${profile.id}:${config.model}`].message}
+                                  </div>
+                                )}
                               </div>
                             ))}
                             {getModelConfigs(profile).length === 0 && (

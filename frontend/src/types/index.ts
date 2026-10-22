@@ -63,6 +63,7 @@ export interface LLMModelConfig {
   enabled: boolean;
   priority: number;
   status: ModelAvailability;
+  capability_statuses?: Partial<Record<ModelCapability, ModelAvailability>>;
   last_checked_at?: string;
   last_error?: string;
 }

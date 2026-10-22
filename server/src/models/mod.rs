@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct User {
@@ -26,7 +27,7 @@ pub struct AuthModeResponse {
 /// 模型可以被路由到的业务能力。
 ///
 /// 这组值是内部稳定契约，不直接依赖具体供应商的模型命名规则。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelCapability {
     Text,
@@ -76,6 +77,9 @@ pub struct LlmModelConfig {
     pub priority: i32,
     #[serde(default)]
     pub status: ModelAvailability,
+    /// 按能力保存主动探测结果。缺失时沿用模型总状态，兼容旧配置。
+    #[serde(default)]
+    pub capability_statuses: HashMap<ModelCapability, ModelAvailability>,
     #[serde(default)]
     pub last_checked_at: Option<String>,
     #[serde(default)]

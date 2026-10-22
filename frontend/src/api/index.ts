@@ -115,6 +115,19 @@ export const settingsApi = {
     wire_api?: string
     reasoning_effort?: string
   }) => api.post<{ ok: boolean; message: string; model: string; wire_api: string; elapsed_ms: number }>('/settings/llm/test', payload),
+  testModelCapabilities: (payload: {
+    base_url: string
+    api_keys: string[]
+    model: string
+    wire_api?: string
+    reasoning_effort?: string
+    capabilities: string[]
+  }) => api.post<{
+    ok: boolean
+    model: string
+    elapsed_ms: number
+    results: Array<{ capability: string; ok: boolean; message: string; elapsed_ms: number }>
+  }>('/settings/model-capability/test', payload),
   testMcp: (payload: MCPServiceConfig) => api.post('/settings/mcp/test', payload),
 };
 

@@ -9,6 +9,7 @@ pub mod notification;
 pub mod project;
 pub mod session;
 pub mod settings;
+pub mod settings_capability;
 
 use axum::Router;
 use tower_http::compression::CompressionLayer;

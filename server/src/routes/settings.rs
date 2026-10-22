@@ -19,6 +19,10 @@ pub fn router() -> Router {
         .route("/api/settings", get(get_settings).put(save_settings))
         .route("/api/settings/models", post(fetch_models))
         .route("/api/settings/llm/test", post(test_llm_connection))
+        .route(
+            "/api/settings/model-capability/test",
+            post(super::settings_capability::test_model_capabilities),
+        )
         .route("/api/settings/mcp/test", post(test_mcp_service))
 }
 
@@ -359,6 +363,7 @@ fn configured_text_model_configs(
                 enabled: true,
                 priority: 0,
                 status: crate::models::ModelAvailability::Unknown,
+                capability_statuses: std::collections::HashMap::new(),
                 last_checked_at: None,
                 last_error: None,
             })

@@ -1,4 +1,4 @@
-import { Check, Clapperboard, Code2, Copy, Download, Eye, GripVertical, Image, Layers3, Maximize2, Minimize2, MessageSquarePlus, PenTool, Pencil, Save, Sparkles } from 'lucide-react'
+import { Check, Clapperboard, Code2, Copy, Download, Eye, GripVertical, History, Image, Layers3, Loader2, Maximize2, Minimize2, MessageSquarePlus, PenTool, Pencil, RotateCcw, Save, Sparkles } from 'lucide-react'
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import mermaid from 'mermaid'
 import ReactMarkdown from 'react-markdown'
@@ -12,7 +12,7 @@ import { SlidePreview } from '@/components/preview/SlidePreview'
 import { SlideEditComposer } from '@/components/artifacts/SlideEditComposer'
 import { Toolbar } from '@/components/toolbar/Toolbar'
 import { WordPreview } from '@/components/artifacts/WordPreview'
-import type { Artifact, ChatMessage, PPTProject, Slide, ToolKind } from '@/types'
+import type { Artifact, ArtifactVersion, ChatMessage, PPTProject, Slide, ToolKind } from '@/types'
 import { findArtifactTurnGroup, groupArtifactsByTurn } from '@/lib/artifact-turns'
 import { prepareMermaidSourceForRender } from '@/lib/mermaid'
 
@@ -36,6 +36,8 @@ interface ArtifactPanelProps {
   artifacts: Artifact[]
   onSelectArtifact: (id: string) => void
   onUpdateArtifact: (id: string, updates: Partial<Artifact>) => void
+  onListArtifactVersions?: (artifactId: string) => Promise<ArtifactVersion[]>
+  onRestoreArtifactVersion?: (artifactId: string, version: number) => Promise<Artifact>
   onExportExcel: (artifact: Artifact) => void
   onExportDocx: (artifact: Artifact) => void
   onExportMarkdown: (artifact: Artifact) => void
@@ -917,6 +919,8 @@ export function ArtifactPanel({
   artifacts,
   onSelectArtifact,
   onUpdateArtifact,
+  onListArtifactVersions,
+  onRestoreArtifactVersion,
   onExportExcel,
   onExportDocx,
   onExportMarkdown,
@@ -926,9 +930,23 @@ export function ArtifactPanel({
 }: ArtifactPanelProps) {
   const [panelWidth, setPanelWidth] = useState(isWide ? 760 : 560)
   const [showSlideEdit, setShowSlideEdit] = useState(false)
+  const [showVersions, setShowVersions] = useState(false)
+  const [versions, setVersions] = useState<ArtifactVersion[]>([])
+  const [versionsLoading, setVersionsLoading] = useState(false)
+  const [versionsError, setVersionsError] = useState('')
+  const [confirmRestoreVersion, setConfirmRestoreVersion] = useState<number | null>(null)
+  const [restoringVersion, setRestoringVersion] = useState<number | null>(null)
   const draggingRef = useRef(false)
   const artifactTurnGroups = useMemo(() => groupArtifactsByTurn(artifacts, messages), [artifacts, messages])
   const activeArtifactTurn = findArtifactTurnGroup(activeArtifact?.id || null, artifactTurnGroups)
+
+  useEffect(() => {
+    setShowVersions(false)
+    setVersions([])
+    setVersionsError('')
+    setConfirmRestoreVersion(null)
+    setRestoringVersion(null)
+  }, [activeArtifact?.id])
 
   useEffect(() => {
     if (!draggingRef.current) setPanelWidth(isWide ? 760 : 560)
@@ -973,11 +991,105 @@ export function ArtifactPanel({
   const canExportActiveArtifact = activeArtifact?.kind === 'document' || activeArtifact?.kind === 'markdown' || activeArtifact?.kind === 'sheet' || activeArtifact?.kind === 'drawio'
   const canEditCurrentSlide = effectiveTool === 'ppt' && slides.length > 0 && !!slides[currentSlideIndex]
   const currentSlide = slides[currentSlideIndex]
+  const canManageVersions = Boolean(activeArtifact && onListArtifactVersions && onRestoreArtifactVersion)
+
+  const handleToggleVersions = async () => {
+    if (!activeArtifact || !onListArtifactVersions) return
+    if (showVersions) {
+      setShowVersions(false)
+      return
+    }
+    setShowVersions(true)
+    setVersionsLoading(true)
+    setVersionsError('')
+    try {
+      setVersions(await onListArtifactVersions(activeArtifact.id))
+    } catch (error) {
+      setVersionsError(error instanceof Error ? error.message : '版本记录加载失败')
+    } finally {
+      setVersionsLoading(false)
+    }
+  }
+
+  const handleRestoreVersion = async (version: ArtifactVersion) => {
+    if (!activeArtifact || !onRestoreArtifactVersion) return
+    const isCurrent = JSON.stringify(version.artifact) === JSON.stringify(activeArtifact)
+    if (isCurrent) return
+    setRestoringVersion(version.version)
+    setVersionsError('')
+    try {
+      await onRestoreArtifactVersion(activeArtifact.id, version.version)
+      setVersions(await onListArtifactVersions?.(activeArtifact.id) || [])
+    } catch (error) {
+      setVersionsError(error instanceof Error ? error.message : '版本恢复失败')
+    } finally {
+      setRestoringVersion(null)
+      setConfirmRestoreVersion(null)
+    }
+  }
+
+  const versionPopover = showVersions && activeArtifact ? (
+    <div className="absolute left-3 right-3 top-16 z-30 max-h-[min(520px,calc(100%-5rem))] overflow-y-auto rounded-2xl border border-surface-200 bg-white p-3 shadow-[0_18px_55px_rgba(24,24,27,0.18)]">
+      <div className="mb-2 flex items-start justify-between gap-3">
+        <div>
+          <div className="text-sm font-semibold text-surface-800">产物版本</div>
+          <div className="mt-0.5 text-[11px] leading-5 text-surface-400">恢复不会覆盖历史，会生成新的当前版本</div>
+        </div>
+        <button type="button" className="btn-ghost h-7 px-2 text-xs" onClick={() => setShowVersions(false)}>关闭</button>
+      </div>
+      {versionsLoading ? (
+        <div className="flex items-center justify-center gap-2 rounded-xl bg-surface-50 px-3 py-6 text-xs text-surface-500"><Loader2 className="h-4 w-4 animate-spin" />正在加载版本记录…</div>
+      ) : versionsError ? (
+        <div className="rounded-xl border border-rose-100 bg-rose-50 px-3 py-3 text-xs leading-5 text-rose-700">{versionsError}</div>
+      ) : versions.length === 0 ? (
+        <div className="rounded-xl bg-surface-50 px-3 py-6 text-center text-xs leading-5 text-surface-500">暂时没有可用版本记录</div>
+      ) : (
+        <div className="space-y-2">
+          {versions.map((item) => {
+            const isCurrent = JSON.stringify(item.artifact) === JSON.stringify(activeArtifact)
+            return (
+              <div key={item.id} className={`rounded-xl border px-3 py-2.5 ${isCurrent ? 'border-primary-200 bg-primary-50/60' : 'border-surface-100 bg-surface-50/60'}`}>
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex min-w-0 items-center gap-2">
+                    <span className="text-sm font-semibold text-surface-800">版本 {item.version}</span>
+                    {isCurrent && <span className="rounded-full bg-primary-100 px-2 py-0.5 text-[10px] font-semibold text-primary-700">当前</span>}
+                  </div>
+                  {!isCurrent && confirmRestoreVersion !== item.version && (
+                    <button
+                      type="button"
+                      className="inline-flex shrink-0 items-center gap-1 rounded-full border border-surface-200 bg-white px-2.5 py-1 text-[11px] font-semibold text-surface-600 transition hover:border-primary-200 hover:text-primary-700 disabled:cursor-not-allowed disabled:opacity-50"
+                      disabled={restoringVersion !== null}
+                      onClick={() => setConfirmRestoreVersion(item.version)}
+                    >
+                      <RotateCcw className="h-3 w-3" />
+                      恢复
+                    </button>
+                  )}
+                </div>
+                <div className="mt-1 text-[11px] text-surface-400">{new Date(item.created_at).toLocaleString('zh-CN')}</div>
+                {confirmRestoreVersion === item.version && (
+                  <div className="mt-2 flex items-center justify-between gap-2 rounded-lg bg-amber-50 px-2.5 py-2 text-[11px] text-amber-800">
+                    <span>恢复后会保留当前内容，确定继续吗？</span>
+                    <div className="flex shrink-0 gap-1.5">
+                      <button type="button" className="rounded-full px-2 py-1 text-surface-500 hover:bg-white" onClick={() => setConfirmRestoreVersion(null)}>取消</button>
+                      <button type="button" className="rounded-full bg-surface-950 px-2.5 py-1 font-semibold text-white disabled:opacity-50" disabled={restoringVersion !== null} onClick={() => void handleRestoreVersion(item)}>
+                        {restoringVersion === item.version ? <Loader2 className="inline h-3 w-3 animate-spin" /> : '确定恢复'}
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  ) : null
 
   // 移动端全屏覆盖模式
   if (isMobile) {
     return (
-      <div className="flex h-full w-full flex-col bg-white">
+      <div className="relative flex h-full w-full flex-col bg-white">
         {/* 移动端顶栏 */}
         <div className="flex h-14 shrink-0 items-center justify-between border-b border-surface-100 bg-white/90 px-3">
           <div className="flex min-w-0 items-center gap-2">
@@ -1002,9 +1114,15 @@ export function ArtifactPanel({
             {canExportActiveArtifact && activeArtifact?.kind === 'drawio' && (
               <button className="btn-secondary h-8 px-2.5 text-xs" onClick={() => onExportDrawio(activeArtifact)}><Download className="h-3.5 w-3.5" /></button>
             )}
+            <button className="btn-secondary h-8 px-2.5 text-xs" disabled={!canManageVersions} onClick={() => void handleToggleVersions()} title="查看产物版本">
+              <History className="h-3.5 w-3.5" />
+              版本
+            </button>
             <button className="btn-ghost h-8 px-2" onClick={() => onOpenChange(false)} title="关闭">关闭</button>
           </div>
         </div>
+
+        {versionPopover}
 
         {showSlideEdit && currentSlide && (
           <SlideEditComposer
@@ -1175,12 +1293,18 @@ export function ArtifactPanel({
               下载 draw.io
             </button>
           )}
+          <button className="btn-secondary h-8 px-2.5 text-xs" disabled={!canManageVersions} onClick={() => void handleToggleVersions()} title="查看产物版本">
+            <History className="h-3.5 w-3.5" />
+            版本
+          </button>
           <button className="btn-ghost h-8 px-2" onClick={() => onWideChange(!isWide)} title="切换宽度">
             {isWide ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
           </button>
           <button className="btn-ghost h-8 px-2" onClick={() => onOpenChange(false)} title="关闭右侧面板">关闭</button>
         </div>
       </div>
+
+      {versionPopover}
 
       {artifacts.length > 0 && (
         <div className="shrink-0 border-b border-surface-100 bg-white/80 px-3 py-2">

@@ -1,7 +1,7 @@
 import axios from 'axios';
 import { useAuthStore } from '@/stores/auth-store';
 import { getChatSseEventKey, isTerminalChatSseEvent, normalizeChatSseEvent, parseSseData } from '@/lib/chat-events';
-import type { TokenResponse, ToolKind, Artifact, PersistedSession, AppSettings, MCPServiceConfig, ChatAttachment, ChatSSEEvent, ChatTargetContext } from '@/types';
+import type { TokenResponse, ToolKind, Artifact, ArtifactVersion, PersistedSession, AppSettings, MCPServiceConfig, ChatAttachment, ChatSSEEvent, ChatTargetContext } from '@/types';
 
 const API_BASE = '/api';
 
@@ -69,6 +69,12 @@ export const sessionApi = {
     api.get<PersistedSession>(`/chat/session/${id}`, { signal, params: { include_artifacts: includeArtifacts } }),
   getSessionArtifacts: (id: string, signal?: AbortSignal) =>
     api.get<{ artifacts: Artifact[] }>(`/chat/session/${id}/artifacts`, { signal }),
+  saveSessionArtifacts: (id: string, artifacts: Artifact[]) =>
+    api.put<{ saved: boolean; artifacts: Artifact[] }>(`/chat/session/${id}/artifacts`, { artifacts }),
+  listArtifactVersions: (sessionId: string, artifactId: string) =>
+    api.get<{ artifact_id: string; versions: ArtifactVersion[] }>(`/chat/session/${sessionId}/artifacts/${artifactId}/versions`),
+  restoreArtifactVersion: (sessionId: string, artifactId: string, version: number) =>
+    api.post<{ restored: boolean; artifact: Artifact }>(`/chat/session/${sessionId}/artifacts/${artifactId}/versions/${version}/restore`),
   updateSession: (id: string, updates: { title?: string; project_id?: string | null; order_col?: number }) => api.patch(`/chat/session/${id}`, updates),
   deleteSession: (id: string) => api.delete(`/chat/session/${id}`),
 };

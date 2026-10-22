@@ -106,6 +106,16 @@ export interface Artifact {
   updated_at: string;
 }
 
+export interface ArtifactVersion {
+  id: string;
+  session_id: string;
+  artifact_id: string;
+  version: number;
+  artifact: Artifact;
+  created_at: string;
+  created_by?: string | null;
+}
+
 export interface ToolConfigOption {
   key: string;
   label: string;

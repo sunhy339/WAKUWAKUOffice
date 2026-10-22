@@ -11,7 +11,7 @@ import { ConversationSidebar } from '@/components/history/ConversationSidebar'
 import { ArtifactPanel } from '@/components/artifacts/ArtifactPanel'
 import { SettingsDialog } from '@/components/settings/SettingsDialog'
 import { AlertCircle, CheckCircle2, Info, Play, X, PanelRightClose, PanelRight, Files, Menu, Settings2 } from 'lucide-react'
-import type { AppSettings, Artifact, ChatAttachment, ChatTargetContext, ChatStreamPhase, ConversationRecord, InputRef, LLMProfile, PersistedSession, ProjectMeta, SessionProcessEvent, ToolKind, ToolConfigMap } from '@/types'
+import type { AppSettings, Artifact, ArtifactVersion, ChatAttachment, ChatTargetContext, ChatStreamPhase, ConversationRecord, InputRef, LLMProfile, PersistedSession, ProjectMeta, SessionProcessEvent, ToolKind, ToolConfigMap } from '@/types'
 import { extractArtifactSummary } from '@/lib/artifact-summary'
 import { chatModelsFromProfiles, supportsChatModel } from '@/lib/model-capabilities'
 import { extractMermaidSource } from '@/lib/mermaid'
@@ -368,6 +368,7 @@ export default function Studio() {
   const retryRequestsRef = useRef<Record<string, RetryRequest>>({})
   const autoExportedArtifactIdsRef = useRef<Set<string>>(new Set())
   const autoSavedArtifactIdsRef = useRef<Set<string>>(new Set())
+  const artifactSaveQueueRef = useRef<Promise<void>>(Promise.resolve())
   const attachmentInputRef = useRef<HTMLInputElement>(null)
   const toastTimerRef = useRef<number | null>(null)
   // 历史会话详情是异步请求；用序号丢弃较早的响应，避免快速点击 A → B
@@ -1607,6 +1608,40 @@ export default function Studio() {
     }
   }
 
+  const handleArtifactUpdate = (artifactId: string, updates: Partial<Artifact>) => {
+    updateArtifact(artifactId, updates)
+    const currentSessionId = usePPTStore.getState().sessionId
+    if (!currentSessionId) return
+
+    // 预览区的表格、draw.io 等编辑器直接更新本地状态；这里同步整组产物，
+    // 由后端按内容变化写入不可变版本，避免每个组件各自维护一套保存逻辑。
+    const nextArtifacts = usePPTStore.getState().artifacts
+    artifactSaveQueueRef.current = artifactSaveQueueRef.current
+      .catch(() => undefined)
+      .then(() => sessionApi.saveSessionArtifacts(currentSessionId, nextArtifacts).then(() => undefined))
+      .catch((error) => {
+        console.warn('[artifact-version] 保存产物版本失败:', error)
+      })
+  }
+
+  const listArtifactVersions = async (artifactId: string): Promise<ArtifactVersion[]> => {
+    const currentSessionId = usePPTStore.getState().sessionId
+    if (!currentSessionId) return []
+    const response = await sessionApi.listArtifactVersions(currentSessionId, artifactId)
+    return response.data.versions || []
+  }
+
+  const restoreArtifactVersion = async (artifactId: string, version: number): Promise<Artifact> => {
+    const currentSessionId = usePPTStore.getState().sessionId
+    if (!currentSessionId) throw new Error('当前会话尚未保存')
+    const response = await sessionApi.restoreArtifactVersion(currentSessionId, artifactId, version)
+    const restored = response.data.artifact
+    updateArtifact(restored.id, restored)
+    if (restored.kind === 'ppt') applyPptArtifact(restored, true)
+    showToast(`已恢复到版本 ${version}，并生成新的当前版本`, 'success')
+    return restored
+  }
+
   const inferToolFromMessage = (text: string, pendingAttachments: ChatAttachment[] = []): ToolKind => {
     const lower = text.toLowerCase()
     const hits: ToolKind[] = []
@@ -2643,7 +2678,9 @@ export default function Studio() {
               activeArtifact={activeArtifact}
               artifacts={artifacts}
               onSelectArtifact={setActiveArtifact}
-              onUpdateArtifact={updateArtifact}
+              onUpdateArtifact={handleArtifactUpdate}
+              onListArtifactVersions={listArtifactVersions}
+              onRestoreArtifactVersion={restoreArtifactVersion}
               onExportExcel={handleExportExcel}
               onExportDocx={handleExportDocx}
               onExportMarkdown={handleExportMarkdown}
@@ -2675,7 +2712,9 @@ export default function Studio() {
               activeArtifact={activeArtifact}
               artifacts={artifacts}
               onSelectArtifact={setActiveArtifact}
-              onUpdateArtifact={updateArtifact}
+              onUpdateArtifact={handleArtifactUpdate}
+              onListArtifactVersions={listArtifactVersions}
+              onRestoreArtifactVersion={restoreArtifactVersion}
               onExportExcel={handleExportExcel}
               onExportDocx={handleExportDocx}
               onExportMarkdown={handleExportMarkdown}

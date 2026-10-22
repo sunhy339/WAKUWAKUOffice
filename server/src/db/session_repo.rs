@@ -58,6 +58,17 @@ pub struct SessionDetail {
     pub artifacts: Vec<Artifact>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArtifactVersion {
+    pub id: String,
+    pub session_id: String,
+    pub artifact_id: String,
+    pub version: i64,
+    pub artifact: Artifact,
+    pub created_at: String,
+    pub created_by: Option<String>,
+}
+
 pub async fn create(
     pool: &DbPool,
     owner_id: &str,
@@ -306,9 +317,21 @@ pub async fn save_artifacts(
     session_id: &str,
     artifacts: &[Artifact],
 ) -> AppResult<()> {
+    save_artifacts_with_versions(pool, session_id, artifacts, None).await
+}
+
+pub async fn save_artifacts_with_versions(
+    pool: &DbPool,
+    session_id: &str,
+    artifacts: &[Artifact],
+    created_by: Option<&str>,
+) -> AppResult<()> {
     let now = chrono::Utc::now().to_rfc3339();
     let payload = serde_json::to_string(artifacts)?;
     let id = uuid::Uuid::new_v4().to_string();
+    let created_by = created_by.map(str::to_owned);
+
+    let mut tx = pool.begin().await?;
 
     // 使用 UPSERT：SQLite 用 ON CONFLICT，MySQL 用 ON DUPLICATE KEY UPDATE
     let cfg = crate::config::config();
@@ -323,7 +346,7 @@ pub async fn save_artifacts(
         .bind(&payload)
         .bind(&now)
         .bind(&now)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
     } else {
         sqlx::query(
@@ -336,10 +359,132 @@ pub async fn save_artifacts(
         .bind(&payload)
         .bind(&now)
         .bind(&now)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
     }
+
+    for artifact in artifacts {
+        let artifact_payload = serde_json::to_string(artifact)?;
+        let latest = sqlx::query(
+            "SELECT payload, version
+             FROM artifact_versions
+             WHERE session_id = ? AND artifact_id = ?
+             ORDER BY version DESC LIMIT 1",
+        )
+        .bind(session_id)
+        .bind(&artifact.id)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        let (is_unchanged, next_version) = match latest {
+            Some(row) => {
+                let latest_payload = read_text(&row, 0)?;
+                let latest_version: i64 = row.try_get(1)?;
+                (
+                    latest_payload == artifact_payload,
+                    latest_version.saturating_add(1),
+                )
+            }
+            None => (false, 1),
+        };
+
+        if !is_unchanged {
+            sqlx::query(
+                "INSERT INTO artifact_versions
+                 (id, session_id, artifact_id, version, payload, created_at, created_by)
+                 VALUES (?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(uuid::Uuid::new_v4().to_string())
+            .bind(session_id)
+            .bind(&artifact.id)
+            .bind(next_version)
+            .bind(&artifact_payload)
+            .bind(&now)
+            .bind(&created_by)
+            .execute(&mut *tx)
+            .await?;
+        }
+    }
+
+    tx.commit().await?;
     Ok(())
+}
+
+pub async fn get_artifact_versions(
+    pool: &DbPool,
+    session_id: &str,
+    artifact_id: &str,
+) -> AppResult<Vec<ArtifactVersion>> {
+    let rows = sqlx::query(
+        "SELECT id, version, payload, created_at, created_by
+         FROM artifact_versions
+         WHERE session_id = ? AND artifact_id = ?
+         ORDER BY version DESC",
+    )
+    .bind(session_id)
+    .bind(artifact_id)
+    .fetch_all(pool)
+    .await?;
+
+    rows.into_iter()
+        .map(|row| {
+            let payload = read_text(&row, 2)?;
+            let artifact: Artifact = serde_json::from_str(&payload)?;
+            Ok(ArtifactVersion {
+                id: read_text(&row, 0)?,
+                session_id: session_id.to_string(),
+                artifact_id: artifact_id.to_string(),
+                version: row.try_get(1)?,
+                artifact,
+                created_at: row.try_get(3)?,
+                created_by: read_optional_text(&row, 4)?,
+            })
+        })
+        .collect()
+}
+
+pub async fn restore_artifact_version(
+    pool: &DbPool,
+    session_id: &str,
+    artifact_id: &str,
+    version: i64,
+    created_by: Option<&str>,
+) -> AppResult<Option<Artifact>> {
+    let row = sqlx::query(
+        "SELECT payload FROM artifact_versions
+         WHERE session_id = ? AND artifact_id = ? AND version = ?",
+    )
+    .bind(session_id)
+    .bind(artifact_id)
+    .bind(version)
+    .fetch_optional(pool)
+    .await?;
+
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let payload = read_text(&row, 0)?;
+    let mut restored: Artifact = serde_json::from_str(&payload)?;
+    let mut artifacts = get_artifacts(pool, session_id).await?;
+    let now = chrono::Utc::now().to_rfc3339();
+
+    if let Some(index) = artifacts
+        .iter()
+        .position(|artifact| artifact.id == artifact_id)
+    {
+        let current = &artifacts[index];
+        restored.id = current.id.clone();
+        restored.created_at = current.created_at.clone();
+        restored.version = current.version.saturating_add(1);
+        restored.updated_at = now;
+        artifacts[index] = restored.clone();
+    } else {
+        restored.updated_at = now;
+        artifacts.push(restored.clone());
+    }
+
+    save_artifacts_with_versions(pool, session_id, &artifacts, created_by).await?;
+    Ok(Some(restored))
 }
 
 pub async fn get_artifacts(pool: &DbPool, session_id: &str) -> AppResult<Vec<Artifact>> {
@@ -573,6 +718,10 @@ pub async fn delete(pool: &DbPool, session_id: &str, owner_id: &str) -> AppResul
     }
 
     sqlx::query("DELETE FROM messages WHERE session_id = ?")
+        .bind(session_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM artifact_versions WHERE session_id = ?")
         .bind(session_id)
         .execute(&mut *tx)
         .await?;

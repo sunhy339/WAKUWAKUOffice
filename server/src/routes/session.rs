@@ -6,8 +6,9 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::auth::middleware::AuthUser;
-use crate::db::session_repo;
+use crate::db::{project_repo, session_repo};
 use crate::error::AppError;
+use crate::models::Artifact;
 use crate::state;
 
 pub fn router() -> Router {
@@ -21,7 +22,15 @@ pub fn router() -> Router {
         )
         .route(
             "/api/chat/session/:session_id/artifacts",
-            get(get_session_artifacts),
+            get(get_session_artifacts).put(save_session_artifacts),
+        )
+        .route(
+            "/api/chat/session/:session_id/artifacts/:artifact_id/versions",
+            get(list_artifact_versions),
+        )
+        .route(
+            "/api/chat/session/:session_id/artifacts/:artifact_id/versions/:version/restore",
+            post(restore_artifact_version),
         )
         .route("/api/chat/session/:session_id/messages", get(get_messages))
         .route("/api/chat/session/:session_id/clear", post(clear_session))
@@ -42,6 +51,11 @@ struct UpdateSessionPayload {
     title: Option<String>,
     project_id: Option<Value>,
     order_col: Option<i64>,
+}
+
+#[derive(Deserialize)]
+struct SaveArtifactsPayload {
+    artifacts: Vec<Artifact>,
 }
 
 async fn list_sessions(
@@ -120,6 +134,120 @@ async fn get_session_artifacts(
     }
     let artifacts = session_repo::get_artifacts(&pool, &session_id).await?;
     Ok(Json(json!({ "artifacts": artifacts })))
+}
+
+async fn save_session_artifacts(
+    user: AuthUser,
+    Path(session_id): Path<String>,
+    Json(payload): Json<SaveArtifactsPayload>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let pool = state::db_pool();
+    let session = session_repo::find_by_id(&pool, &session_id)
+        .await?
+        .ok_or(AppError::NotFound("会话不存在".into()))?;
+    if session.owner_id != user.0.id {
+        return Err(AppError::Forbidden);
+    }
+
+    session_repo::save_artifacts_with_versions(
+        &pool,
+        &session_id,
+        &payload.artifacts,
+        Some(&user.0.id),
+    )
+    .await?;
+    Ok(Json(
+        json!({ "saved": true, "artifacts": payload.artifacts }),
+    ))
+}
+
+async fn list_artifact_versions(
+    user: AuthUser,
+    Path((session_id, artifact_id)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let pool = state::db_pool();
+    let session = session_repo::find_by_id(&pool, &session_id)
+        .await?
+        .ok_or(AppError::NotFound("会话不存在".into()))?;
+    if session.owner_id != user.0.id {
+        return Err(AppError::Forbidden);
+    }
+
+    // 兼容版本管理上线前已经存在的会话：第一次打开版本面板时，
+    // 将当前快照作为初始版本写入，后续仍然只按内容变化创建新版本。
+    let artifacts = session_repo::get_artifacts(&pool, &session_id).await?;
+    if artifacts.iter().any(|artifact| artifact.id == artifact_id) {
+        session_repo::save_artifacts_with_versions(&pool, &session_id, &artifacts, None).await?;
+    } else {
+        return Err(AppError::NotFound("产物不存在".into()));
+    }
+
+    let versions = session_repo::get_artifact_versions(&pool, &session_id, &artifact_id).await?;
+    Ok(Json(json!({
+        "artifact_id": artifact_id,
+        "versions": versions,
+    })))
+}
+
+async fn restore_artifact_version(
+    user: AuthUser,
+    Path((session_id, artifact_id, version)): Path<(String, String, i64)>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let pool = state::db_pool();
+    let session = session_repo::find_by_id(&pool, &session_id)
+        .await?
+        .ok_or(AppError::NotFound("会话不存在".into()))?;
+    if session.owner_id != user.0.id {
+        return Err(AppError::Forbidden);
+    }
+
+    let artifact = session_repo::restore_artifact_version(
+        &pool,
+        &session_id,
+        &artifact_id,
+        version,
+        Some(&user.0.id),
+    )
+    .await?
+    .ok_or(AppError::NotFound("产物版本不存在".into()))?;
+
+    // PPT 的预览项目使用独立 JSON 文件作为渲染来源，恢复会话快照时也要
+    // 同步该文件，否则刷新页面后项目文件会把恢复结果覆盖回去。
+    if artifact.kind == "ppt" {
+        if let Some(project_id) = artifact
+            .content
+            .get("project_id")
+            .and_then(|value| value.as_str())
+        {
+            if let Some(mut project) = project_repo::load_ppt_project(project_id)? {
+                if project.owner_id != user.0.id {
+                    return Err(AppError::Forbidden);
+                }
+                if let Some(slides) = artifact.content.get("slides") {
+                    project.slides = serde_json::from_value(slides.clone()).map_err(|error| {
+                        AppError::BadRequest(format!("PPT 版本内容无效: {error}"))
+                    })?;
+                }
+                if let Some(theme) = artifact
+                    .content
+                    .get("theme")
+                    .and_then(|value| value.as_str())
+                {
+                    project.theme = theme.to_string();
+                }
+                if let Some(history) = artifact.content.get("history") {
+                    project.history = serde_json::from_value(history.clone()).ok();
+                }
+                project.updated_at = artifact.updated_at.clone();
+                project_repo::save_ppt_project(&project)?;
+            }
+        }
+    }
+
+    Ok(Json(json!({
+        "restored": true,
+        "artifact": artifact,
+    })))
 }
 
 async fn get_messages(
